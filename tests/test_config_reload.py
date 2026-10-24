@@ -14,14 +14,16 @@ from tests.conftest import base_config, write_config
 
 def rewrite_config(path: str, config: dict) -> None:
     """Rewrite the config and wait until its mtime actually changes — Windows
-    filesystems have coarse (15-24ms) timestamp granularity."""
+    timestamps have coarse granularity, so compare nanoseconds and fail loudly
+    if the file timestamp never advances (would make the reload test moot)."""
     path_obj = Path(path)
-    old = path_obj.stat().st_mtime
+    old = path_obj.stat().st_mtime_ns
     path_obj.write_text(yaml.safe_dump(config), encoding="utf-8")
-    for _ in range(100):
-        if path_obj.stat().st_mtime != old:
+    for _ in range(300):
+        if path_obj.stat().st_mtime_ns != old:
             return
         time.sleep(0.01)
+    raise AssertionError("config mtime did not change within 3s")
 
 
 async def test_reload_picks_up_new_plugin(tmp_path):
@@ -43,12 +45,13 @@ async def test_reload_picks_up_new_plugin(tmp_path):
 def rewrite_raw(path: str, text: str) -> None:
     """Rewrite raw content, waiting for the mtime to actually change."""
     path_obj = Path(path)
-    old = path_obj.stat().st_mtime
+    old = path_obj.stat().st_mtime_ns
     path_obj.write_text(text, encoding="utf-8")
-    for _ in range(100):
-        if path_obj.stat().st_mtime != old:
+    for _ in range(300):
+        if path_obj.stat().st_mtime_ns != old:
             return
         time.sleep(0.01)
+    raise AssertionError("config mtime did not change within 3s")
 
 
 async def test_reload_with_broken_yaml_keeps_previous_state(tmp_path):
