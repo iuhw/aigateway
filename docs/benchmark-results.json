@@ -1,0 +1,143 @@
+{
+  "scenarios": {
+    "baseline_nonstream": {
+      "n": 1000,
+      "concurrency": 8,
+      "errors": 0,
+      "wall_s": 0.4636,
+      "rps": 2156.9,
+      "latency_ms_avg": 0.456,
+      "latency_ms_p50": 0.438,
+      "latency_ms_p95": 0.563,
+      "latency_ms_p99": 0.711
+    },
+    "full_plugins_nonstream": {
+      "n": 1000,
+      "concurrency": 8,
+      "errors": 0,
+      "wall_s": 0.5276,
+      "rps": 1895.5,
+      "latency_ms_avg": 0.52,
+      "latency_ms_p50": 0.497,
+      "latency_ms_p95": 0.657,
+      "latency_ms_p99": 0.816
+    },
+    "baseline_streaming": {
+      "n": 300,
+      "concurrency": 10,
+      "ttft_ms_avg": 4.015,
+      "ttft_ms_p95": 5.794,
+      "total_ms_avg": 4.026,
+      "chunks_avg": 5
+    },
+    "full_plugins_streaming": {
+      "n": 300,
+      "concurrency": 10,
+      "ttft_ms_avg": 4.201,
+      "ttft_ms_p95": 6.146,
+      "total_ms_avg": 4.213,
+      "chunks_avg": 5
+    },
+    "cache_hit": {
+      "n": 500,
+      "concurrency": 8,
+      "errors": 0,
+      "wall_s": 0.2514,
+      "rps": 1989.2,
+      "latency_ms_avg": 0.494,
+      "latency_ms_p50": 0.452,
+      "latency_ms_p95": 0.685,
+      "latency_ms_p99": 1.058
+    },
+    "cache_miss": {
+      "n": 500,
+      "concurrency": 8,
+      "errors": 0,
+      "wall_s": 0.2594,
+      "rps": 1927.5,
+      "latency_ms_avg": 0.511,
+      "latency_ms_p50": 0.467,
+      "latency_ms_p95": 0.662,
+      "latency_ms_p99": 0.781
+    },
+    "failover_forced": {
+      "n": 100,
+      "concurrency": 1,
+      "errors": 0,
+      "wall_s": 1.5559,
+      "rps": 64.3,
+      "latency_ms_avg": 15.541,
+      "latency_ms_p50": 15.501,
+      "latency_ms_p95": 16.224,
+      "latency_ms_p99": 16.379
+    },
+    "failover_cooldown_steady": {
+      "n": 300,
+      "concurrency": 8,
+      "errors": 0,
+      "wall_s": 0.1819,
+      "rps": 1649.0,
+      "latency_ms_avg": 0.598,
+      "latency_ms_p50": 0.577,
+      "latency_ms_p95": 0.695,
+      "latency_ms_p99": 0.789
+    },
+    "rate_limit_rejection": {
+      "n": 200,
+      "concurrency": 8,
+      "errors": 190,
+      "wall_s": 0.1305,
+      "rps": 1532.7,
+      "latency_ms_avg": 0.642,
+      "latency_ms_p50": 0.613,
+      "latency_ms_p95": 0.776,
+      "latency_ms_p99": 1.235
+    },
+    "concurrency_scaling": {
+      "1": {
+        "n": 400,
+        "concurrency": 1,
+        "errors": 0,
+        "wall_s": 0.2415,
+        "rps": 1656.3,
+        "latency_ms_avg": 0.593,
+        "latency_ms_p50": 0.58,
+        "latency_ms_p95": 0.688,
+        "latency_ms_p99": 0.792
+      },
+      "8": {
+        "n": 400,
+        "concurrency": 8,
+        "errors": 0,
+        "wall_s": 0.2329,
+        "rps": 1717.6,
+        "latency_ms_avg": 0.573,
+        "latency_ms_p50": 0.571,
+        "latency_ms_p95": 0.713,
+        "latency_ms_p99": 0.897
+      },
+      "32": {
+        "n": 400,
+        "concurrency": 32,
+        "errors": 0,
+        "wall_s": 0.2441,
+        "rps": 1638.8,
+        "latency_ms_avg": 0.6,
+        "latency_ms_p50": 0.578,
+        "latency_ms_p95": 0.722,
+        "latency_ms_p99": 0.969
+      },
+      "64": {
+        "n": 400,
+        "concurrency": 64,
+        "errors": 0,
+        "wall_s": 0.2603,
+        "rps": 1536.6,
+        "latency_ms_avg": 0.642,
+        "latency_ms_p50": 0.574,
+        "latency_ms_p95": 0.69,
+        "latency_ms_p99": 0.924
+      }
+    }
+  }
+}
