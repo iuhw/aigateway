@@ -47,6 +47,15 @@ class StateBackend(ABC):
         """
 
     @abstractmethod
+    async def adjust_bucket(self, name: str, delta: float) -> None:
+        """Correct a bucket after the fact (refund over-prepaid / charge more).
+
+        Used by token-based limiting: requests prepay an estimate and are
+        reconciled with actual usage on completion. ``delta`` may be negative.
+        If the original window expired meanwhile, the adjustment is dropped.
+        """
+
+    @abstractmethod
     async def set_cooldown(self, name: str, remaining_s: float) -> None:
         """Publish a cooldown that expires `remaining_s` from now."""
 
@@ -63,14 +72,19 @@ class InMemoryBackend(StateBackend):
     """Same-process backend; equivalent to the pre-Redis behavior."""
 
     def __init__(self) -> None:
-        self._buckets: dict[str, tuple[float, float, float]] = {}  # name -> (tokens, rate_per_s, updated)
+        # name -> (tokens, rate_per_s, updated, capacity)
+        self._buckets: dict[str, tuple[float, float, float, float]] = {}
         self._cooldowns: dict[str, float] = {}  # name -> expiry (monotonic)
 
     async def acquire_bucket(
         self, name: str, rate_per_minute: float, capacity: float, amount: float = 1.0
     ) -> tuple[bool, float]:
         now = time.monotonic()
-        tokens, rate, updated = self._buckets.get(name, (capacity, rate_per_minute / 60.0, now))
+        entry = self._buckets.get(name)
+        if entry is None:
+            tokens, rate, updated = capacity, rate_per_minute / 60.0, now
+        else:
+            tokens, rate, updated = entry[0], entry[1], entry[2]
         tokens = min(capacity, tokens + (now - updated) * rate)
         if tokens >= amount:
             tokens -= amount
@@ -78,8 +92,15 @@ class InMemoryBackend(StateBackend):
         else:
             allowed = False
             retry_after = (amount - tokens) / rate if rate > 0 else 60.0
-        self._buckets[name] = (tokens, rate_per_minute / 60.0, now)
+        self._buckets[name] = (tokens, rate_per_minute / 60.0, now, capacity)
         return allowed, retry_after
+
+    async def adjust_bucket(self, name: str, delta: float) -> None:
+        entry = self._buckets.get(name)
+        if entry is None or delta == 0:
+            return
+        tokens, rate, updated, capacity = entry
+        self._buckets[name] = (max(0.0, min(capacity, tokens + delta)), rate, updated, capacity)
 
     async def set_cooldown(self, name: str, remaining_s: float) -> None:
         self._cooldowns[name] = time.monotonic() + remaining_s
@@ -140,6 +161,23 @@ class RedisBackend(StateBackend):
         if count <= limit:
             return True, 0.0
         return False, ttl / 1000.0
+
+    async def adjust_bucket(self, name: str, delta: float) -> None:
+        """Reconcile after the fact. ``delta`` follows the InMemoryBackend
+        convention: positive = refund budget. The Redis counter counts
+        *consumption*, so a refund decrements it."""
+        try:
+            if delta == 0:
+                return
+            key = self._bucket_key(name)
+            await self._redis.incrby(key, -int(delta))
+            ttl = await self._redis.ttl(key)
+            if ttl is None or ttl < 0:
+                # The original window expired before the adjustment landed:
+                # drop the orphan counter rather than polluting the next window.
+                await self._redis.delete(key)
+        except Exception as exc:  # noqa: BLE001
+            raise StateBackendError(f"redis adjust_bucket failed: {exc}") from exc
 
     async def set_cooldown(self, name: str, remaining_s: float) -> None:
         try:

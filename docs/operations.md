@@ -84,12 +84,17 @@
 
 ## 5. 已知边界（生产使用须知）
 
-1. **限流按请求数**，不按 token 计量（token 数已有指标，token 级限流在路线图）。
-2. **单机网络栈**：SO_REUSEPORT 多进程 / k8s 多 Pod 均可，但网关不提供 TLS——在入口层终结。
-3. **流式 block 过滤的窗口**：检测到关键词前的块已发出（与 Higress 同类插件的已知取舍）。
-4. **仅 OpenAI 协议上游**：Anthropic/Gemini 原生协议不做转换。
-5. **缓存为单键精确匹配**（跨副本共享依赖 Redis 后端仅在限流路径；响应缓存是进程内的——同副本重复请求才命中）。
-6. `usage` 缺失时 token 用量为 ~4 字符/token 估算，**不可用于计费**。
+1. **token 级限流**基于估算预扣 + 完成后按上游实际用量多退少补；估算用 ~4 字符/token 启发式
+   （未带 `max_tokens` 时按 512 计）。窗口边界处固定窗口允许最多 2x 突发（与 Kong 相同取舍）。
+2. **Anthropic 兼容面为文本补全范围**：`/v1/messages` 支持 system/text blocks/stop_sequences/
+   temperature/top_p/max_tokens 与完整流式事件；tools、图片、citations 明确拒绝（400）。
+3. **单机网络栈**：SO_REUSEPORT 多进程 / k8s 多 Pod 均可，但网关不提供 TLS——在入口层终结。
+4. **流式 block 过滤的窗口**：检测到关键词前的块已发出（与 Higress 同类插件的已知取舍）。
+5. **仅 OpenAI 协议上游**：上游侧统一为 OpenAI 协议；客户端侧提供 OpenAI + Anthropic 双协议。
+6. **缓存为单键精确匹配**（进程内——同副本重复请求才命中；跨副本响应缓存在路线图）。
+7. **成本追踪**按 `pricing` 配置的静态单价计算（无分层阶梯/折扣价）；`usage` 缺失时 token 用量为
+   ~4 字符/token 估算，估算口径下成本同样为近似值。
+8. Windows 上热重载受目录元数据缓存影响可能延迟数秒生效（Linux 即时）。
 
 ## 6. 升级与回滚
 

@@ -293,6 +293,12 @@ class GatewayApp:
                     continue
                 text_parts.append(chunk_text(filtered))
                 yield _sse(filtered)
+            # Settle usage before end hooks so plugins (e.g. token-limit
+            # reconciliation) see the final numbers.
+            if outcome.usage and not ctx.usage_reported:
+                ctx.prompt_tokens = outcome.usage.get("prompt_tokens")
+                ctx.completion_tokens = outcome.usage.get("completion_tokens")
+                ctx.usage_reported = True
             await state.plugins.run_stream_end(ctx)
         except GatewayError as exc:
             error = exc
@@ -338,6 +344,28 @@ class GatewayApp:
             ctx.prompt_tokens = estimate_tokens(request_text(ctx.payload))
             ctx.completion_tokens = estimate_tokens(response_text(body))
 
+    def _pricing_for(self, model: str) -> dict[str, float] | None:
+        pricing = self.state.config.section("pricing") or {}
+        entry = pricing.get(model)
+        return entry if isinstance(entry, dict) else None
+
+    def _record_cost(self, ctx: PluginContext) -> None:
+        """Accumulate upstream spend; cache hits cost nothing. Silent no-op for
+        unpriced models."""
+        if ctx.cache_hit or not ctx.usage_reported:
+            return
+        pricing = self._pricing_for(ctx.model)
+        if not pricing:
+            return
+        try:
+            usd = (
+                (ctx.prompt_tokens or 0) / 1000 * float(pricing.get("input_per_1k", 0))
+                + (ctx.completion_tokens or 0) / 1000 * float(pricing.get("output_per_1k", 0))
+            )
+        except (TypeError, ValueError):
+            return
+        self.metrics.inc_cost(ctx.model, usd)
+
     def _metrics_finish(self, ctx: PluginContext) -> None:
         provider = ctx.deployment.provider if ctx.deployment else "none"
         status = ctx.status_code or 200
@@ -349,6 +377,7 @@ class GatewayApp:
 
             ctx.prompt_tokens = ctx.prompt_tokens or _est(request_text(ctx.payload))
         self.metrics.inc_tokens(ctx.model, provider, ctx.prompt_tokens or 0, ctx.completion_tokens or 0)
+        self._record_cost(ctx)
         if ctx.cache_hit:
             self.metrics.inc_cache(ctx.model, True)
         else:

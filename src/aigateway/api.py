@@ -114,6 +114,53 @@ def create_app(config_path: str, *, config_watcher: bool = True) -> FastAPI:
     async def chat_completions_alias(request: Request) -> Response:
         return await _chat(request)
 
+    @app.post("/v1/messages")
+    async def anthropic_messages(request: Request) -> Response:
+        """Anthropic Messages API surface: translated to the internal OpenAI
+        pipeline (same auth/plugins/routing), responses translated back."""
+        from aigateway.anthropic_api import (
+            error_body,
+            prompt_text_of,
+            stream_events,
+            translate_request,
+            translate_response,
+        )
+
+        raw = await _read_body(request)
+        try:
+            body = json.loads(raw)
+        except Exception as exc:
+            raise BadRequestError(f"request body must be valid JSON: {exc}") from exc
+        if not isinstance(body, dict):
+            raise BadRequestError("request body must be a JSON object")
+
+        client_host = request.client.host if request.client else ""
+        try:
+            openai_body = translate_request(body)
+            stream = bool(body.get("stream"))
+            openai_body["stream"] = stream
+            result = await gateway.chat(openai_body, dict(request.headers), client_host)
+        except GatewayError as exc:
+            return JSONResponse(status_code=exc.status_code, content=error_body(exc))
+
+        if isinstance(result, dict):
+            return JSONResponse(status_code=200, content=translate_response(result))
+
+        prompt = prompt_text_of(openai_body)
+        max_tokens = int(openai_body.get("max_tokens") or 0)
+
+        async def anthropic_stream() -> AsyncIterator[str]:
+            async for event in stream_events(
+                result, model=str(openai_body["model"]), prompt_text=prompt, max_tokens=max_tokens
+            ):
+                yield event
+
+        return StreamingResponse(
+            anthropic_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     @app.get("/v1/models")
     async def list_models() -> dict[str, Any]:
         return {

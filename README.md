@@ -9,17 +9,19 @@ Envoy AI Gateway 的成熟设计自主实现（调研见 [docs/](docs/)）。
 
 **网关级**
 
-- OpenAI 兼容 API：`POST /v1/chat/completions`（流式 SSE + 非流式）、`GET /v1/models`
+- **双协议入口**：OpenAI 兼容 `POST /v1/chat/completions` + **Anthropic Messages API `POST /v1/messages`**
+  （非流式 + 流式事件翻译，Claude SDK 可直接接入；文本补全范围内支持 tools 之外的完整协议）
 - 多上游：一切 OpenAI 协议服务（OpenAI / Ollama / vLLM / DeepSeek / Groq / LM Studio …）
 - 路由：模型 → 多部署映射，round-robin / weighted / least-latency 负载均衡，优先级分层（priority tier）
 - 可靠性：超时、指数退避重试、部署间故障转移、模型级降级链（fallbacks）、
   连续失败冷却熔断（cooldown，借鉴 LiteLLM）、流式首块前可无感切换
 - **多实例共享状态**：Redis 后端的分布式限流（原子固定窗口，fail-open 可配）与跨副本冷却同步；
   单进程默认内存后端，语义等价（见 `state.py` 文档）
-- 流量治理：认证（虚拟 key + 模型白名单）、限流（模型级/身份级 RPM）、
-  请求体/消息数/消息长度上限（413 拒绝）、`/metrics` `/admin/*` 独立管理密钥
+- 流量治理：认证（虚拟 key + 模型白名单）、限流（**请求级 + token 级** RPM：预扣估算、
+  按上游实际用量多退少补）、请求体/消息数/消息长度上限（413 拒绝）、`/metrics` `/admin/*` 独立管理密钥
+- **成本追踪**：`pricing` 配置每模型单价 → `gateway_cost_usd_total` 指标按模型累计美元花费
 - 缓存：精确匹配响应缓存（TTL + 容量淘汰）
-- 可观测性：Prometheus 指标（请求/延迟/TTFT/token/插件拒绝/缓存命中/上游尝试/后端错误）、
+- 可观测性：Prometheus 指标（请求/延迟/TTFT/token/插件拒绝/缓存命中/上游尝试/后端错误/成本）、
   结构化 JSON 请求日志（轮转）、`/healthz` `/readyz` `/metrics` `/admin/routes` `/admin/plugins`
 - 运维：YAML 配置 + **热重载**（改坏自动保留旧状态）、`aigateway check` 配置校验 CLI、
   Dockerfile + docker-compose（含 Redis/Ollama/Prometheus/Grafana 全家桶）
@@ -127,8 +129,9 @@ aigateway serve --config gateway.prod.yaml --port 8080
 
 ```
 src/aigateway/
-  api.py            FastAPI 适配层（SSE、错误映射、请求上限、admin 认证、运维端点）
-  app.py            GatewayApp 编排（插件链→路由→调度→插件链→计量）
+  api.py            FastAPI 适配层（OpenAI + Anthropic 双协议、错误映射、请求上限、运维端点）
+  anthropic_api.py  Anthropic Messages 协议翻译（请求/响应/流式事件/错误信封）
+  app.py            GatewayApp 编排（插件链→路由→调度→插件链→计量→成本）
   config.py         YAML 配置、构建器、热重载 watcher（纳秒 mtime 防抖）
   state.py          共享状态后端：InMemory | Redis（分布式限流+冷却同步）
   schemas.py        OpenAI 兼容请求 schema 与文本抽取工具
@@ -142,10 +145,10 @@ src/aigateway/
   plugins/
     base.py         Plugin 接口、PluginChain、注册表、外部加载
     keyword_filter.py / auth.py / rate_limit.py / response_cache.py / request_log.py
-  observability/metrics.py   Prometheus 指标
-tests/              126 tests（单元/集成/wire 故障注入/混沌/多实例/安全/热重载/停机）
+  observability/metrics.py   Prometheus 指标（含成本）
+tests/              154 tests（单元/集成/wire 故障注入/混沌/多实例/安全/热重载/停机/Anthropic/token/cost）
 benchmarks/         基准测试（--quick 供 CI）
-scripts/            负载测试、soak 耐久、并行下载器、Ollama 安装、E2E 验证
+scripts/            负载测试、soak 耐久、并行下载器、Ollama 安装、E2E 验证（13 项）
 deploy/             生产配置、Prometheus 抓取、Grafana 仪表盘与数据源
 docs/               调研（3 篇）、基准/负载/soak/E2E 报告、运维手册
 ```

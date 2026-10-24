@@ -10,6 +10,12 @@ server:
   # max_messages: 128
   # max_message_chars: 200000
 
+# ---- cost tracking -------------------------------------------------------
+# Static per-model USD pricing; accumulates gateway_cost_usd_total by model.
+# pricing:
+#   glm4:9b: { input_per_1k: 0.0, output_per_1k: 0.0 }
+#   gpt-4o-mini: { input_per_1k: 0.00015, output_per_1k: 0.0006 }
+
 # ---- shared state across instances --------------------------------------
 # memory (default): limits are per-process. For N replicas/workers use redis:
 # shared_state:
@@ -81,6 +87,9 @@ plugins:
       # model_rpm: {"glm4:9b": 300}
       default_rpm: 600
       identity_rpm: 120
+      # token 级限流（预扣估算，完成后按实际用量多退少补）：
+      # token_rpm: {"glm4:9b": 200000}
+      # identity_token_rpm: 50000
   request-log-plugin:
     config:
       # path: logs/requests.jsonl

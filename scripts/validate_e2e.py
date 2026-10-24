@@ -207,12 +207,77 @@ async def check_11_concurrency(client: httpx.AsyncClient) -> None:
     record("11 concurrent burst x5", all(s == 200 for s in statuses), f"statuses={list(statuses)}")
 
 
+async def check_12_anthropic_non_stream(client: httpx.AsyncClient) -> None:
+    response = await client.post(
+        "/v1/messages",
+        headers={"Authorization": "Bearer sk-e2e-demo-key"},
+        json={
+            "model": "glm4:9b",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "用一句话介绍长城"}],
+        },
+        timeout=320,
+    )
+    if response.status_code != 200:
+        record("12 Anthropic /v1/messages non-stream", False, f"status={response.status_code} body={response.text[:150]}")
+        return
+    body = response.json()
+    ok = (
+        body.get("type") == "message"
+        and body.get("role") == "assistant"
+        and body["content"][0]["type"] == "text"
+        and len(body["content"][0]["text"]) > 0
+        and body["usage"]["input_tokens"] > 0
+    )
+    record(
+        "12 Anthropic /v1/messages non-stream",
+        ok,
+        f"reply={body['content'][0]['text'][:30]!r} stop={body.get('stop_reason')}",
+    )
+
+
+async def check_13_anthropic_stream(client: httpx.AsyncClient) -> None:
+    names: list[str] = []
+    text_parts: list[str] = []
+    async with client.stream(
+        "POST",
+        "/v1/messages",
+        headers={"Authorization": "Bearer sk-e2e-demo-key"},
+        json={
+            "model": "glm4:9b",
+            "max_tokens": 100,
+            "stream": True,
+            "messages": [{"role": "user", "content": "从1数到3，用顿号分隔"}],
+        },
+        timeout=320,
+    ) as response:
+        status = response.status_code
+        current = None
+        async for line in response.aiter_lines():
+            if line.startswith("event: "):
+                current = line[7:]
+            elif line.startswith("data: ") and current:
+                data = json.loads(line[6:])
+                names.append(current)
+                if current == "content_block_delta":
+                    text_parts.append(data.get("delta", {}).get("text", ""))
+    text = "".join(text_parts)
+    ok = (
+        status == 200
+        and names[:2] == ["message_start", "content_block_start"]
+        and names[-1] == "message_stop"
+        and len(text) > 0
+    )
+    record("13 Anthropic streaming events", ok, f"events={len(names)} text={text[:30]!r}")
+
+
 async def main_async(config_path: str, report_path: str) -> int:
     app = create_app(config_path, config_watcher=False)
     checks = [
         check_1_models, check_2_non_stream, check_3_stream, check_4_auth,
         check_5_keyword_block, check_6_keyword_mask, check_7_cache,
         check_8_rate_limit, check_9_failover, check_10_metrics, check_11_concurrency,
+        check_12_anthropic_non_stream, check_13_anthropic_stream,
     ]
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://e2e") as client:

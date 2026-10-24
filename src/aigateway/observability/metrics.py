@@ -58,6 +58,12 @@ class Metrics:
             ("operation",),
             registry=r,
         )
+        self.cost_usd_total = Counter(
+            "gateway_cost_usd_total",
+            "Accumulated upstream spend in USD (pricing from gateway config)",
+            ("model",),
+            registry=r,
+        )
         self.cache_requests_total = Counter(
             "gateway_cache_requests_total",
             "Cache lookups",
@@ -94,6 +100,10 @@ class Metrics:
 
     def inc_state_backend_error(self, operation: str) -> None:
         self.state_backend_errors_total.labels(operation=operation).inc()
+
+    def inc_cost(self, model: str, usd: float) -> None:
+        if usd > 0:
+            self.cost_usd_total.labels(model=model).inc(usd)
 
     def inc_cache(self, model: str, hit: bool) -> None:
         self.cache_requests_total.labels(model=model, result="hit" if hit else "miss").inc()
