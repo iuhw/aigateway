@@ -4,6 +4,18 @@
 server:
   host: 0.0.0.0
   port: 8080
+  # --- production hardening (uncomment for real deployments) ---
+  # admin_api_key: "change-me"      # protects /metrics and /admin/*
+  # max_body_bytes: 1048576         # 413 beyond this
+  # max_messages: 128
+  # max_message_chars: 200000
+
+# ---- shared state across instances --------------------------------------
+# memory (default): limits are per-process. For N replicas/workers use redis:
+# shared_state:
+#   backend: redis
+#   redis_url: redis://127.0.0.1:6379/0
+#   key_prefix: aigw
 
 # ---- upstream providers -------------------------------------------------
 # `type: openai` speaks the OpenAI chat-completions protocol, which covers

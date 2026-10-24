@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from pathlib import Path
 
@@ -12,18 +13,25 @@ from aigateway.app import GatewayApp
 from tests.conftest import base_config, write_config
 
 
+def _force_distinct_mtime(path_obj: Path) -> None:
+    """Windows caches directory metadata, so a just-written file can keep
+    reporting a stale mtime for several seconds. Set an explicit future mtime
+    so the watcher's poll observes a deterministic change instead of racing
+    the cache (production servers are Linux where writes are visible at once)."""
+    future = time.time() + 3600
+    os.utime(path_obj, (future, future))
+
+
 def rewrite_config(path: str, config: dict) -> None:
-    """Rewrite the config and wait until its mtime actually changes — Windows
-    timestamps have coarse granularity, so compare nanoseconds and fail loudly
-    if the file timestamp never advances (would make the reload test moot)."""
     path_obj = Path(path)
-    old = path_obj.stat().st_mtime_ns
     path_obj.write_text(yaml.safe_dump(config), encoding="utf-8")
-    for _ in range(300):
-        if path_obj.stat().st_mtime_ns != old:
-            return
-        time.sleep(0.01)
-    raise AssertionError("config mtime did not change within 3s")
+    _force_distinct_mtime(path_obj)
+
+
+def rewrite_raw(path: str, text: str) -> None:
+    path_obj = Path(path)
+    path_obj.write_text(text, encoding="utf-8")
+    _force_distinct_mtime(path_obj)
 
 
 async def test_reload_picks_up_new_plugin(tmp_path):
@@ -40,18 +48,6 @@ async def test_reload_picks_up_new_plugin(tmp_path):
     assert changed is True
     assert [p["name"] for p in app.plugin_info()] == ["keyword-filter-plugin"]
     await app.aclose()
-
-
-def rewrite_raw(path: str, text: str) -> None:
-    """Rewrite raw content, waiting for the mtime to actually change."""
-    path_obj = Path(path)
-    old = path_obj.stat().st_mtime_ns
-    path_obj.write_text(text, encoding="utf-8")
-    for _ in range(300):
-        if path_obj.stat().st_mtime_ns != old:
-            return
-        time.sleep(0.01)
-    raise AssertionError("config mtime did not change within 3s")
 
 
 async def test_reload_with_broken_yaml_keeps_previous_state(tmp_path):

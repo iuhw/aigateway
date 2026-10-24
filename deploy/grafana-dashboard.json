@@ -1,0 +1,100 @@
+{
+  "title": "AI Gateway",
+  "uid": "aigateway-core",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Request rate (RPS)",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        { "expr": "sum(rate(gateway_requests_total[1m]))", "legendFormat": "all" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Error rate (5xx/min)",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+      "fieldConfig": {
+        "defaults": { "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 5 } ] } }
+      },
+      "targets": [
+        { "expr": "sum(rate(gateway_requests_total{status=~\"5..\"}[5m])) * 60", "legendFormat": "5xx/min" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Requests rejected (plugins+limits /min)",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        { "expr": "sum(rate(gateway_plugin_rejections_total[5m])) * 60", "legendFormat": "plugins" },
+        { "expr": "sum(rate(gateway_rate_limit_rejections_total[5m])) * 60", "legendFormat": "rate-limit" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "State backend errors (/min)",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+      "fieldConfig": {
+        "defaults": { "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } }
+      },
+      "targets": [
+        { "expr": "sum(rate(gateway_state_backend_errors_total[5m])) * 60", "legendFormat": "errors" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Latency p50 / p95 / p99 (end-to-end)",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(gateway_request_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(gateway_request_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(gateway_request_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Time to first token (streaming)",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(gateway_stream_first_token_seconds_bucket[5m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(gateway_stream_first_token_seconds_bucket[5m])) by (le))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(gateway_stream_first_token_seconds_bucket[5m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Tokens /sec by direction",
+      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum(rate(gateway_tokens_total[5m])) by (direction)", "legendFormat": "{{direction}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Upstream attempts by outcome",
+      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum(rate(gateway_upstream_attempts_total[5m])) by (provider, outcome)", "legendFormat": "{{provider}} {{outcome}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Cache hit ratio",
+      "gridPos": { "x": 0, "y": 20, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum(rate(gateway_cache_requests_total{result=\"hit\"}[5m])) / sum(rate(gateway_cache_requests_total[5m]))", "legendFormat": "hit ratio" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Plugin rejections by plugin",
+      "gridPos": { "x": 12, "y": 20, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum(rate(gateway_plugin_rejections_total[5m])) by (plugin)", "legendFormat": "{{plugin}}" }
+      ]
+    }
+  ]
+}

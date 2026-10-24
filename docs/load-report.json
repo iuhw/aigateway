@@ -1,0 +1,57 @@
+{
+  "upstream_latency_s": 0.3,
+  "concurrency": 16,
+  "gateway": {
+    "non_stream": {
+      "requests": 2025,
+      "errors": 0,
+      "rps": 44.7,
+      "error_rate_pct": 0.0,
+      "latency_p50_s": 0.3587,
+      "latency_p99_s": 0.395,
+      "ttft_p50_s": null,
+      "ttft_p99_s": null
+    },
+    "stream": {
+      "requests": 561,
+      "errors": 0,
+      "rps": 12.3,
+      "error_rate_pct": 0.0,
+      "latency_p50_s": 1.2927,
+      "latency_p99_s": 1.3271,
+      "ttft_p50_s": 0.3408,
+      "ttft_p99_s": 0.3653
+    }
+  },
+  "direct": {
+    "non_stream": {
+      "requests": 1968,
+      "errors": 0,
+      "rps": 43.5,
+      "error_rate_pct": 0.0,
+      "latency_p50_s": 0.3672,
+      "latency_p99_s": 0.3994,
+      "ttft_p50_s": null,
+      "ttft_p99_s": null
+    },
+    "stream": {
+      "requests": 562,
+      "errors": 0,
+      "rps": 12.4,
+      "error_rate_pct": 0.0,
+      "latency_p50_s": 1.2911,
+      "latency_p99_s": 1.3312,
+      "ttft_p50_s": 0.3394,
+      "ttft_p99_s": 0.3723
+    }
+  },
+  "slo_checks": {
+    "gateway_error_rate_lt_0.1pct": true,
+    "gateway_overhead_p99_lt_10ms": true,
+    "ttft_overhead_p50_lt_5ms": true,
+    "ttft_overhead_p99_lt_25ms": true
+  },
+  "overhead_p99_s": -0.0044,
+  "ttft_overhead_p50_s": 0.0014,
+  "ttft_overhead_p99_s": -0.007
+}

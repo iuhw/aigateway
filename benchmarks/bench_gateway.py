@@ -152,27 +152,29 @@ async def run_streaming(client: httpx.AsyncClient, n: int, concurrency: int = 10
 async def main_async(args: argparse.Namespace) -> dict:
     results: dict = {"scenarios": {}}
     scenarios = results["scenarios"]
+    # --quick: CI smoke numbers, not publication-grade sizes
+    q = 0.2 if args.quick else 1.0
 
     # ---- 1. baseline (no plugins) ------------------------------------------
     client, _tmp = make_client(base_config())
     payload = lambda i: {"model": "bench", "messages": [{"role": "user", "content": f"msg {i}"}]}
     await run_latency(client, payload, 50, 8)  # warmup
-    scenarios["baseline_nonstream"] = await run_latency(client, payload, 1000, 8)
+    scenarios["baseline_nonstream"] = await run_latency(client, payload, int(1000 * q), 8)
     await client.aclose()
 
     # ---- 2. full plugin chain overhead --------------------------------------
     client, _tmp = make_client(base_config(plugins=all_plugins_config()))
     await run_latency(client, payload, 50, 8)
-    scenarios["full_plugins_nonstream"] = await run_latency(client, payload, 1000, 8)
+    scenarios["full_plugins_nonstream"] = await run_latency(client, payload, int(1000 * q), 8)
     await client.aclose()
 
     # ---- 3. streaming --------------------------------------------------------
     client, _tmp = make_client(base_config())
-    scenarios["baseline_streaming"] = await run_streaming(client, 300)
+    scenarios["baseline_streaming"] = await run_streaming(client, int(300 * q))
     await client.aclose()
 
     client, _tmp = make_client(base_config(plugins=all_plugins_config()))
-    scenarios["full_plugins_streaming"] = await run_streaming(client, 300)
+    scenarios["full_plugins_streaming"] = await run_streaming(client, int(300 * q))
     await client.aclose()
 
     # ---- 4. cache hit vs miss -------------------------------------------------
@@ -181,9 +183,9 @@ async def main_async(args: argparse.Namespace) -> dict:
     )
     hit_payload = {"model": "bench", "messages": [{"role": "user", "content": "same"}]}
     await client.post("/v1/chat/completions", json=hit_payload)  # populate
-    scenarios["cache_hit"] = await run_latency(client, lambda i: hit_payload, 500, 8)
+    scenarios["cache_hit"] = await run_latency(client, lambda i: hit_payload, int(500 * q), 8)
     scenarios["cache_miss"] = await run_latency(
-        client, lambda i: {"model": "bench", "messages": [{"role": "user", "content": f"miss {i}"}]}, 500, 8
+        client, lambda i: {"model": "bench", "messages": [{"role": "user", "content": f"miss {i}"}]}, int(500 * q), 8
     )
     await client.aclose()
 
@@ -209,10 +211,10 @@ async def main_async(args: argparse.Namespace) -> dict:
     # concurrency=1 keeps the round-robin cursor deterministic: every request
     # goes dead -> retry dead -> failover to healthy, i.e. full retry+backoff cost.
     await run_latency(client, failover_payload, 10, 1)
-    scenarios["failover_forced"] = await run_latency(client, failover_payload, 100, 1)
+    scenarios["failover_forced"] = await run_latency(client, failover_payload, int(100 * q) + 20, 1)
     await client.aclose()
 
-    # 5b. steady state: cooldown kicks in, dead deployment skipped entirely.
+    # ---- 5b. steady state: cooldown kicks in, dead deployment skipped entirely.
     client, _tmp = make_client(
         base_config(
             extra_providers={"dead": {"type": "mock", "fail_status": 500}},
@@ -229,21 +231,21 @@ async def main_async(args: argparse.Namespace) -> dict:
         )
     )
     await run_latency(client, failover_payload, 20, 4)  # trigger cooldown
-    scenarios["failover_cooldown_steady"] = await run_latency(client, failover_payload, 300, 8)
+    scenarios["failover_cooldown_steady"] = await run_latency(client, failover_payload, int(300 * q), 8)
     await client.aclose()
 
     # ---- 6. rate-limit rejection path ---------------------------------------------
     client, _tmp = make_client(
         base_config(plugins={"rate-limit-plugin": {"config": {"default_rpm": 10}}})
     )
-    scenarios["rate_limit_rejection"] = await run_latency(client, payload, 200, 8)
+    scenarios["rate_limit_rejection"] = await run_latency(client, payload, int(200 * q), 8)
     await client.aclose()
 
     # ---- 7. concurrency scaling (baseline) ------------------------------------------
     client, _tmp = make_client(base_config())
     scaling = {}
     for concurrency in (1, 8, 32, 64):
-        scaling[str(concurrency)] = await run_latency(client, payload, 400, concurrency)
+        scaling[str(concurrency)] = await run_latency(client, payload, int(400 * q), concurrency)
     scenarios["concurrency_scaling"] = scaling
     await client.aclose()
 
@@ -315,6 +317,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="aigateway benchmark")
     parser.add_argument("--out", default="docs/benchmark-report.md")
     parser.add_argument("--json", default="docs/benchmark-results.json")
+    parser.add_argument(
+        "--quick", action="store_true", help="CI smoke: run scenarios at 20%% size"
+    )
     args = parser.parse_args()
 
     results = asyncio.run(main_async(args))

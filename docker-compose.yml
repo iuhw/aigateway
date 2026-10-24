@@ -1,0 +1,88 @@
+# aigateway production topology: gateway (x2 replicas) + Redis (shared limits)
+# + Ollama (model upstream) + Prometheus + Grafana.
+#
+#   docker compose up -d
+#   docker compose exec ollama ollama pull glm4:9b
+#
+# Gateway endpoints:
+#   http://localhost:8080/v1/chat/completions   (Authorization: Bearer <client key>)
+#   http://localhost:3000                       (Grafana, dashboard: AI Gateway)
+#   http://localhost:9090                       (Prometheus)
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    # Uncomment on GPU hosts (needs nvidia-container-toolkit):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  gateway:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      # The in-container entrypoint reads the mounted config; shared_state must
+      # point at redis://redis:6379/0 (see gateway.example.yaml).
+      AIGATEWAY_CONFIG: /etc/aigateway/gateway.yaml
+    volumes:
+      - ./deploy/gateway.prod.yaml:/etc/aigateway/gateway.yaml:ro
+      - ./logs:/app/logs
+    ports:
+      - "8080:8080"
+    deploy:
+      replicas: 2
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./deploy/grafana-dashboard.json:/var/lib/grafana/dashboards/aigateway.json:ro
+      - ./deploy/grafana-datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
+      - ./deploy/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+
+volumes:
+  ollama-models:
+  prometheus-data:
+  grafana-data:

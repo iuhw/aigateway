@@ -14,11 +14,15 @@ Envoy AI Gateway 的成熟设计自主实现（调研见 [docs/](docs/)）。
 - 路由：模型 → 多部署映射，round-robin / weighted / least-latency 负载均衡，优先级分层（priority tier）
 - 可靠性：超时、指数退避重试、部署间故障转移、模型级降级链（fallbacks）、
   连续失败冷却熔断（cooldown，借鉴 LiteLLM）、流式首块前可无感切换
-- 流量治理：认证（虚拟 key + 模型白名单）、限流（token bucket，模型级/身份级 RPM）
+- **多实例共享状态**：Redis 后端的分布式限流（原子固定窗口，fail-open 可配）与跨副本冷却同步；
+  单进程默认内存后端，语义等价（见 `state.py` 文档）
+- 流量治理：认证（虚拟 key + 模型白名单）、限流（模型级/身份级 RPM）、
+  请求体/消息数/消息长度上限（413 拒绝）、`/metrics` `/admin/*` 独立管理密钥
 - 缓存：精确匹配响应缓存（TTL + 容量淘汰）
-- 可观测性：Prometheus 指标（请求/延迟/TTFT/token/插件拒绝/缓存命中/上游尝试）、
+- 可观测性：Prometheus 指标（请求/延迟/TTFT/token/插件拒绝/缓存命中/上游尝试/后端错误）、
   结构化 JSON 请求日志（轮转）、`/healthz` `/readyz` `/metrics` `/admin/routes` `/admin/plugins`
-- 运维：YAML 配置 + **热重载**（路由/插件分钟级生效，不动连接池）
+- 运维：YAML 配置 + **热重载**（改坏自动保留旧状态）、`aigateway check` 配置校验 CLI、
+  Dockerfile + docker-compose（含 Redis/Ollama/Prometheus/Grafana 全家桶）
 
 **插件式可插拔能力**
 
@@ -72,14 +76,22 @@ client ──► FastAPI (api.py)
 ## 测试与基准
 
 ```bash
-.venv/Scripts/python -m pytest tests/ -q        # 80 个单元/集成测试
+.venv/Scripts/python -m pytest tests/ -q        # 126 个测试（含故障注入/混沌/多实例/安全/热重载/停机）
 .venv/Scripts/python -m ruff check src tests    # lint
 .venv/Scripts/python benchmarks/bench_gateway.py  # 基准 → docs/benchmark-report.md
+
+# 生产验证三件套
+.venv/Scripts/python scripts/load_test.py     # 真实HTTP双臂负载测试 + SLO 断言 → docs/load-report.md
+.venv/Scripts/python scripts/soak_test.py --minutes 10   # 耐久/泄漏检测 → docs/soak-report.md
+.venv/Scripts/python -m aigateway check gateway.prod.yaml  # 配置校验
 ```
 
-基准结果（零延迟 mock 上游，测网关自身开销）：单请求 p50 **0.44ms**（~2100 RPS），
-全插件链 +0.06ms，流式 TTFT 开销 +0.03ms，冷却稳态与基线持平。见
-[docs/benchmark-report.md](docs/benchmark-report.md)。
+量化结论（报告见 docs/）：
+
+- **网关自身开销** p50 0.44ms（~2100 RPS 单进程），全插件链 +0.06ms，流式 TTFT 开销 +0.03ms
+- **真实 HTTP 双臂对测**：非流式开销 p99 -4.4ms（与直连同水平）、TTFT 开销 p50 1.4ms，错误率 0%
+- **混沌注入**（30% 随机故障+延迟，300 请求）：零挂起、100% 终态映射、>97% 成功率
+- **耐久**：5 分钟 @400 RPS 零错误，RSS 斜率 +0.021 MB/min（无泄漏迹象）
 
 ## Ollama 端到端验证
 
@@ -95,29 +107,47 @@ scripts/setup_ollama.ps1          # 或手动：ollama create glm4:9b -f Modelfi
 限流 429、死上游故障转移、Prometheus 指标、并发突发。结果写入
 [docs/e2e-ollama-validation.md](docs/e2e-ollama-validation.md)。
 
+## 生产部署
+
+```bash
+# 一键拉起 gateway(x2) + redis + ollama + prometheus + grafana
+docker compose up -d
+docker compose exec ollama ollama pull glm4:9b
+
+# 或裸机运行（先 aigateway check 校验）
+aigateway serve --config gateway.prod.yaml --port 8080
+```
+
+- SLO 与验证证据：[docs/operations.md](docs/operations.md) §2
+- 告警规则与 runbook（Redis 故障、上游劣化、配置回滚等 6 类场景）：[docs/operations.md](docs/operations.md) §3-4
+- 已知生产边界（token 级限流、TLS 终结点、流式过滤窗口等）：[docs/operations.md](docs/operations.md) §5
+- CI（GitHub Actions）：lint + 126 测试 + 基准 smoke + Docker 构建/健康检查
+
 ## 项目结构
 
 ```
 src/aigateway/
-  api.py            FastAPI 适配层（SSE、错误映射、运维端点）
+  api.py            FastAPI 适配层（SSE、错误映射、请求上限、admin 认证、运维端点）
   app.py            GatewayApp 编排（插件链→路由→调度→插件链→计量）
-  config.py         YAML 配置、构建器、热重载 watcher
+  config.py         YAML 配置、构建器、热重载 watcher（纳秒 mtime 防抖）
+  state.py          共享状态后端：InMemory | Redis（分布式限流+冷却同步）
   schemas.py        OpenAI 兼容请求 schema 与文本抽取工具
   errors.py         OpenAI 风格错误体系
   core/
     provider.py     Provider 抽象（chat / stream / health）
-    openai_provider.py   OpenAI 协议 HTTP 上游
+    openai_provider.py   OpenAI 协议 HTTP 上游（可注入 transport 供故障注入）
     mock_provider.py     确定性 mock（测试/基准）
-    router.py       路由、负载均衡、冷却、优先级分层
+    router.py       路由、负载均衡、冷却、优先级分层、冷却导入导出
     dispatcher.py   重试/退避/故障转移/降级链/流式切换
   plugins/
     base.py         Plugin 接口、PluginChain、注册表、外部加载
     keyword_filter.py / auth.py / rate_limit.py / response_cache.py / request_log.py
   observability/metrics.py   Prometheus 指标
-tests/              80 tests（含 HTTP 端到端）
-benchmarks/         基准测试
-scripts/            并行下载器、Ollama 安装、E2E 验证
-docs/               调研（2 篇 + 综合）、基准报告、E2E 报告
+tests/              126 tests（单元/集成/wire 故障注入/混沌/多实例/安全/热重载/停机）
+benchmarks/         基准测试（--quick 供 CI）
+scripts/            负载测试、soak 耐久、并行下载器、Ollama 安装、E2E 验证
+deploy/             生产配置、Prometheus 抓取、Grafana 仪表盘与数据源
+docs/               调研（3 篇）、基准/负载/soak/E2E 报告、运维手册
 ```
 
 ## License

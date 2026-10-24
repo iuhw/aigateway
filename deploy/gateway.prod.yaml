@@ -1,0 +1,61 @@
+# aigateway production config used by docker-compose (deploy/).
+# Diffs from gateway.example.yaml: Redis shared state, admin key, no anonymous.
+
+providers:
+  ollama:
+    type: openai
+    base_url: http://ollama:11434/v1
+    api_key: ollama
+    supports_stream_usage_option: true
+    max_connections: 64
+
+models:
+  glm4:9b:
+    deployments:
+      - provider: ollama
+        model: glm4:9b
+    policy:
+      timeout_s: 300
+      retries: 1
+      retry_backoff_s: 0.5
+      cooldown_s: 30
+      allowed_fails: 2
+      strategy: round_robin
+
+shared_state:
+  backend: redis
+  redis_url: redis://redis:6379/0
+  key_prefix: aigw
+
+server:
+  # CHANGE ME before any real deployment. Protects /metrics and /admin/*.
+  admin_api_key: "change-me-admin-key"
+  max_body_bytes: 1048576       # 1 MiB is plenty for chat completions
+  max_messages: 128
+  max_message_chars: 200000
+
+plugins:
+  auth-plugin:
+    config:
+      header: Authorization
+      allow_anonymous: false    # production: every caller needs a key
+      api_keys:
+        - key: sha256:0000000000000000000000000000000000000000000000000000000000000000
+          name: REPLACE-ME       # put real sha256(key) digests here, not plaintext
+          rpm: 120
+  keyword-filter-plugin:
+    config:
+      words: []                  # fill with your blocklist
+      mode: block
+      check: [request]
+  rate-limit-plugin:
+    config:
+      default_rpm: 600           # shared across all replicas via Redis
+      identity_rpm: 120
+  response-cache-plugin:
+    config:
+      ttl_s: 300
+  request-log-plugin:
+    config:
+      path: /app/logs/requests.jsonl
+      log_prompt: false
