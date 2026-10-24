@@ -48,12 +48,14 @@ class GatewayApp:
         self._watch_task: asyncio.Task | None = None
         self._sync_task: asyncio.Task | None = None
         self._shared_backend: Any = None
+        self._watcher = ConfigWatcher(self.config_path)
         self.state = self._build_state()
 
     # -- lifecycle ---------------------------------------------------------------
 
     def _build_state(self) -> GatewayState:
-        config = ConfigWatcher(self.config_path).initialize()
+        assert self._watcher is not None
+        config = self._watcher.initialize()
         if self._shared_backend is None:
             self._shared_backend = self._build_shared_backend(config)
         return self._materialize(config)
@@ -85,7 +87,6 @@ class GatewayApp:
     async def start_config_watcher(self, interval_s: float = 5.0) -> None:
         if self._watch_task is not None:
             return
-        self._watcher = ConfigWatcher(self.config_path)
         async def _loop() -> None:
             while True:
                 await asyncio.sleep(interval_s)
@@ -130,8 +131,7 @@ class GatewayApp:
 
     async def reload_if_changed(self) -> bool:
         """Hot-reload config; rebuilds router/plugins, providers only if changed."""
-        assert self._watcher is not None
-        fresh = self._watcher.poll()
+        fresh = self._watcher.poll() if self._watcher is not None else None
         if fresh is None:
             return False
         old = self.state

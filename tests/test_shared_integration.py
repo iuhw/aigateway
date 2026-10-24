@@ -41,7 +41,6 @@ def redis_url():
 
 
 def shared_config(tmp_path_factory, redis_url: str, **overrides) -> str:
-    import yaml
 
     config = {
         "shared_state": {"backend": "redis", "redis_url": redis_url, "key_prefix": "gtest"},

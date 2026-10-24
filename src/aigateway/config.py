@@ -159,6 +159,10 @@ class ConfigWatcher:
         self.on_reload = on_reload
         self._lock = threading.Lock()
         self._mtime: float = 0.0
+        try:  # prime so the first poll() only fires on real changes
+            self._mtime = self.path.stat().st_mtime
+        except OSError:
+            pass
 
     def poll(self) -> GatewayConfig | None:
         """Return a fresh config when the file changed; None otherwise."""

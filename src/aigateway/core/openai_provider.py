@@ -41,6 +41,7 @@ class OpenAICompatibleProvider(Provider):
         max_connections: int = 100,
         extra_headers: dict[str, str] | None = None,
         supports_stream_usage_option: bool = False,
+        transport: httpx.AsyncBaseTransport | None = None,
     ):
         super().__init__(name)
         self.base_url = base_url.rstrip("/")
@@ -49,14 +50,23 @@ class OpenAICompatibleProvider(Provider):
             headers["Authorization"] = f"Bearer {api_key}"
         if extra_headers:
             headers.update(extra_headers)
-        self._client = httpx.AsyncClient(
-            base_url=self.base_url,
-            headers=headers,
-            limits=DEFAULT_LIMITS if max_connections == 100 else httpx.Limits(
-                max_connections=max_connections, max_keepalive_connections=min(20, max_connections)
-            ),
-            timeout=_timeout(120.0),
-        )
+        client_kwargs: dict[str, Any] = {
+            "base_url": self.base_url,
+            "headers": headers,
+            "timeout": _timeout(120.0),
+        }
+        if transport is not None:
+            # Test/fault-injection hook: caller-supplied httpx transport.
+            client_kwargs["transport"] = transport
+        else:
+            client_kwargs["limits"] = (
+                DEFAULT_LIMITS
+                if max_connections == 100
+                else httpx.Limits(
+                    max_connections=max_connections, max_keepalive_connections=min(20, max_connections)
+                )
+            )
+        self._client = httpx.AsyncClient(**client_kwargs)
         self.supports_stream_usage_option = supports_stream_usage_option
 
     async def chat(self, *, model: str, payload: dict[str, Any], timeout: float) -> ProviderResult:
