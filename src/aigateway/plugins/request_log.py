@@ -13,14 +13,22 @@ from aigateway.plugins.base import Plugin, PluginContext, register_plugin
 
 
 def build_logger(path: str | None, max_bytes: int, backup_count: int) -> logging.Logger:
+    """File handler failures must not take the gateway down (read-only fs,
+    unwritable dir): degrade to no-op file logging with a loud warning."""
     logger = logging.getLogger("aigateway.request_log")
     logger.setLevel(logging.INFO)
     logger.propagate = False
     if path and not logger.handlers:
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        handler = logging.handlers.RotatingFileHandler(
-            path, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8"
-        )
+        try:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            handler: logging.Handler = logging.handlers.RotatingFileHandler(
+                path, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8"
+            )
+        except OSError as exc:
+            logging.getLogger("aigateway.api").warning(
+                "request_log: cannot open log file %s (%s); file logging disabled", path, exc
+            )
+            return logger
         handler.setFormatter(logging.Formatter("%(message)s"))
         logger.addHandler(handler)
     return logger
