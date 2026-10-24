@@ -6,6 +6,7 @@ import json
 import logging
 import logging.handlers
 import time
+from pathlib import Path
 from typing import Any, ClassVar
 
 from aigateway.plugins.base import Plugin, PluginContext, register_plugin
@@ -16,6 +17,7 @@ def build_logger(path: str | None, max_bytes: int, backup_count: int) -> logging
     logger.setLevel(logging.INFO)
     logger.propagate = False
     if path and not logger.handlers:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         handler = logging.handlers.RotatingFileHandler(
             path, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8"
         )

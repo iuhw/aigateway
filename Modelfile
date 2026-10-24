@@ -1,0 +1,14 @@
+# GLM-4-9B-Chat Q4_K_S for aigateway E2E validation.
+# Explicit GLM-4 chat format: [gMASK]<sop> prefix + <|role|>\ncontent turns.
+# (The GGUF's embedded template resolved to ollama's "ChatGLM4" which omits
+# the [gMASK]<sop> prefix and produced garbage continuations.)
+FROM C:/Users/nwhid/AppData/Local/Temp/glm-4-9b-chat.Q4_K_S.gguf
+PARAMETER temperature 0.7
+PARAMETER num_ctx 8192
+PARAMETER stop "<|system|>"
+PARAMETER stop "<|user|>"
+PARAMETER stop "<|assistant|>"
+PARAMETER stop "<|observation|>"
+TEMPLATE """[gMASK]<sop>{{- range .Messages }}<|{{ .Role }}|>
+{{ .Content }}{{- end }}<|assistant|>
+"""

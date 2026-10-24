@@ -86,7 +86,9 @@ class Plugin(ABC):  # noqa: B024 - hook methods all have no-op defaults
         self.enabled = True
 
     def display_name(self) -> str:
-        return type(self).name or type(self).__name__
+        # `_instance_name` is set by config loading to the plugin's config key,
+        # so multiple instances of one plugin class stay distinguishable.
+        return getattr(self, "_instance_name", None) or type(self).name or type(self).__name__
 
     async def on_request(self, ctx: PluginContext) -> None:
         """Called with the parsed request payload before routing."""

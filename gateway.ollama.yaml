@@ -1,0 +1,83 @@
+# aigateway configuration for the Ollama end-to-end validation.
+# Used by scripts/validate_e2e.py; assumes Ollama serving glm4:9b on 11434.
+
+providers:
+  ollama:
+    type: openai
+    base_url: http://127.0.0.1:11434/v1
+    api_key: ollama
+    supports_stream_usage_option: true
+    max_connections: 32
+  dead-upstream:
+    # always-failing provider used to exercise retry/failover/fallback
+    type: openai
+    base_url: http://127.0.0.1:9
+    api_key: none
+
+models:
+  glm4:9b:
+    deployments:
+      - provider: ollama
+        model: glm4:9b
+    policy:
+      timeout_s: 300        # first inference loads the model into VRAM (slow)
+      retries: 1
+      retry_backoff_s: 1.0
+      cooldown_s: 60
+      allowed_fails: 3
+      strategy: round_robin
+  failover-demo:
+    # dead upstream first, then real ollama deployment -> proves failover
+    deployments:
+      - provider: dead-upstream
+        model: nonexistent
+      - provider: ollama
+        model: glm4:9b
+    policy:
+      timeout_s: 300
+      retries: 0
+      retry_backoff_s: 0.2
+      cooldown_s: 3600      # keep dead upstream "in route" for the demo
+      allowed_fails: 999999
+      failover_on_client_error: true
+  glm4-limited:
+    deployments:
+      - provider: ollama
+        model: glm4:9b
+    policy:
+      timeout_s: 300
+
+plugins:
+  auth-plugin:
+    config:
+      header: Authorization
+      allow_anonymous: false
+      api_keys:
+        - key: sk-e2e-demo-key
+          name: e2e-tester
+  keyword-block:
+    plugin: keyword-filter-plugin
+    order: 20
+    config:
+      words: ["敏感词", "forbidden-topic"]
+      mode: block
+      check: [request]
+      block_message: "E2E: request blocked by keyword filter."
+  keyword-mask:
+    plugin: keyword-filter-plugin
+    order: 25
+    config:
+      words: ["机密"]
+      mode: mask
+      check: [response]
+  response-cache-plugin:
+    config:
+      ttl_s: 600
+  rate-limit-plugin:
+    config:
+      model_rpm: {"glm4-limited": 2}
+      default_rpm: 100000
+  request-log-plugin:
+    config:
+      path: logs/e2e-requests.jsonl
+      log_prompt: false

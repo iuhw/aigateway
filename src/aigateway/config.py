@@ -113,13 +113,16 @@ class GatewayConfig:
             if isinstance(spec, dict) and spec.get("module"):
                 cls = load_external_plugin_class(str(spec["module"]), str(spec.get("class", name)))
             else:
-                cls = lookup_plugin_class(name)
+                # `plugin` allows multiple instances of one plugin class under
+                # different config keys (e.g. two keyword filters).
+                cls = lookup_plugin_class(str(spec.get("plugin", name)))
             if cls is None:
                 raise BadRequestError(
                     f"unknown plugin {name!r}; registered plugins: {registered_plugins()}"
                 )
             order = spec.get("order") if isinstance(spec, dict) else None
             plugin = cls(config if isinstance(config, dict) else {})
+            plugin._instance_name = name  # type: ignore[attr-defined]
             if order is not None:
                 plugin._order = float(order)  # type: ignore[attr-defined]
             plugins.append(plugin)

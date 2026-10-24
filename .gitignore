@@ -9,3 +9,4 @@ build/
 .env
 benchmark_results/
 *.log
+logs/

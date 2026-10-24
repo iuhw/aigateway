@@ -48,6 +48,26 @@ def test_model_without_deployments_rejected():
         GatewayConfig(config).build_router()
 
 
+def test_plugin_alias_allows_multiple_instances():
+    """Two keyword filters under different keys via the `plugin` alias."""
+    config = base_config(
+        plugins={
+            "block-list": {
+                "plugin": "keyword-filter-plugin",
+                "config": {"words": ["a"], "mode": "block"},
+            },
+            "mask-list": {
+                "plugin": "keyword-filter-plugin",
+                "order": 5,
+                "config": {"words": ["b"], "mode": "mask"},
+            },
+        }
+    )
+    chain = GatewayConfig(config).build_plugin_chain()
+    names = [d["name"] for d in chain.describe()]
+    assert names == ["mask-list", "block-list"]  # order=5 runs first
+
+
 def test_external_plugin_module_loading(tmp_path):
     module_path = tmp_path / "external_plugin.py"
     module_path.write_text(
@@ -63,6 +83,6 @@ def test_external_plugin_module_loading(tmp_path):
     try:
         config = base_config(plugins={"ext": {"module": "external_plugin", "class": "External"}})
         chain = GatewayConfig(config).build_plugin_chain()
-        assert [d["name"] for d in chain.describe()] == ["external"]
+        assert [d["name"] for d in chain.describe()] == ["ext"]  # instance name = config key
     finally:
         sys.path.remove(str(tmp_path))
