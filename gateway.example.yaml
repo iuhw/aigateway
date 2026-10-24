@@ -1,0 +1,77 @@
+# aigateway example configuration.
+# Copy to gateway.yaml and adjust. The config file is hot-reloaded on change.
+
+server:
+  host: 0.0.0.0
+  port: 8080
+
+# ---- upstream providers -------------------------------------------------
+# `type: openai` speaks the OpenAI chat-completions protocol, which covers
+# OpenAI itself, Ollama (/v1), vLLM, DeepSeek, Groq, Together, LM Studio, ...
+providers:
+  ollama:
+    type: openai
+    base_url: http://127.0.0.1:11434/v1
+    # Ollama ignores the key; set one anyway so the header is well-formed.
+    api_key: ollama
+    supports_stream_usage_option: true
+    max_connections: 64
+  # openai:
+  #   type: openai
+  #   base_url: https://api.openai.com/v1
+  #   api_key: ${OPENAI_API_KEY}
+
+# ---- model routes ---------------------------------------------------------
+# Each public model name maps to one or more deployments. Routing strategies:
+# round_robin | weighted | least_latency. Lower `priority` is preferred; the
+# next tier is only used while all lower-tier deployments cool down.
+# `fallbacks` names other model routes to try when every deployment failed.
+models:
+  glm4:9b:
+    deployments:
+      - provider: ollama
+        model: glm4:9b
+    policy:
+      timeout_s: 120
+      retries: 1
+      cooldown_s: 30
+      allowed_fails: 2
+      strategy: round_robin
+  # gpt-4o-mini:
+  #   deployments:
+  #     - provider: openai
+  #       model: gpt-4o-mini
+  #   fallbacks: [glm4:9b]
+
+# ---- plugins (order configurable via `order`, lower runs first) -----------
+plugins:
+  auth-plugin:
+    config:
+      header: Authorization
+      allow_anonymous: true          # flip to false in production
+      api_keys:
+        - key: sk-demo-123456
+          name: demo
+          models: null               # null = all models
+          rpm: 120
+  keyword-filter-plugin:
+    config:
+      words: ["敏感词", "weapon", "forbidden"]
+      mode: block                    # block | mask
+      check: [request, response]
+      block_message: "Content rejected by keyword filter."
+  response-cache-plugin:
+    config:
+      ttl_s: 300
+      max_entries: 512
+  rate-limit-plugin:
+    config:
+      # model_rpm: {"glm4:9b": 300}
+      default_rpm: 600
+      identity_rpm: 120
+  request-log-plugin:
+    config:
+      # path: logs/requests.jsonl
+      stdout: false
+      log_prompt: false
+      log_response: false
