@@ -52,6 +52,12 @@ class Metrics:
             ("model",),
             registry=r,
         )
+        self.state_backend_errors_total = Counter(
+            "gateway_state_backend_errors_total",
+            "Shared-state backend failures (fail-open requests included)",
+            ("operation",),
+            registry=r,
+        )
         self.cache_requests_total = Counter(
             "gateway_cache_requests_total",
             "Cache lookups",
@@ -85,6 +91,9 @@ class Metrics:
 
     def inc_rate_limit(self, model: str) -> None:
         self.rate_limit_rejections_total.labels(model=model).inc()
+
+    def inc_state_backend_error(self, operation: str) -> None:
+        self.state_backend_errors_total.labels(operation=operation).inc()
 
     def inc_cache(self, model: str, hit: bool) -> None:
         self.cache_requests_total.labels(model=model, result="hit" if hit else "miss").inc()

@@ -149,3 +149,34 @@ class Router:
         if deployment.consecutive_failures >= route.policy.allowed_fails:
             deployment.cooldown_until = time.monotonic() + route.policy.cooldown_s
             deployment.consecutive_failures = 0
+
+    # -- cross-instance cooldown sync --------------------------------------------
+    # Cooldowns are process-local for the hot path; a background task exports
+    # active cooldowns to the shared backend and adopts remote ones (eventual
+    # consistency, ~seconds). Exactness is not required: every instance fails
+    # over independently, sharing only avoids re-hammering dead upstreams.
+
+    def export_cooldowns(self) -> list[tuple[str, str, float]]:
+        """Active cooldowns as (model, deployment_key, remaining_seconds)."""
+        now = time.monotonic()
+        result: list[tuple[str, str, float]] = []
+        for route in self.routes.values():
+            for deployment in route.deployments:
+                remaining = deployment.cooldown_until - now
+                if remaining > 0:
+                    result.append((route.name, deployment.key, remaining))
+        return result
+
+    def impose_cooldown(self, model: str, deployment_key: str, remaining_s: float) -> bool:
+        """Adopt a remote cooldown; returns True when it extended local state."""
+        route = self.routes.get(model)
+        if route is None:
+            return False
+        for deployment in route.deployments:
+            if deployment.key == deployment_key:
+                local_remaining = deployment.cooldown_until - time.monotonic()
+                if remaining_s > local_remaining:
+                    deployment.cooldown_until = time.monotonic() + remaining_s
+                    return True
+                return False
+        return False

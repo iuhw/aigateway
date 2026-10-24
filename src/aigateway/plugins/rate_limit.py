@@ -1,4 +1,17 @@
-"""Rate limiting plugin: per-model global and per-identity request limiting."""
+"""Rate limiting plugin: per-model global and per-identity request limiting.
+
+Backends:
+- ``memory`` (default): exact within one process; behind N workers each worker
+  enforces its own bucket (limits effectively multiplied by N).
+- ``redis``: shared atomic token bucket across all instances (production).
+  Requires the optional ``redis`` dependency and the gateway's shared_state
+  backend (injected via :meth:`set_backend` by the app on startup).
+
+Redis outage policy: with ``fail_open: true`` (default) requests pass through
+when the backend is unreachable — availability beats strict limiting; every
+failure increments ``gateway_state_backend_errors_total``. Set false to fail
+closed (429).
+"""
 
 from __future__ import annotations
 
@@ -7,6 +20,7 @@ from typing import Any, ClassVar
 
 from aigateway.errors import RateLimitError
 from aigateway.plugins.base import Plugin, PluginContext, register_plugin
+from aigateway.state import InMemoryBackend, StateBackend, StateBackendError
 
 
 class TokenBucket:
@@ -41,6 +55,9 @@ class RateLimitPlugin(Plugin):
       - ``model_rpm``: {model_name: requests_per_minute} global per model
       - ``default_rpm``: fallback for unlisted models
       - ``identity_rpm``: per API-key limit (overrides the key's own rpm)
+      - ``capacity``: bucket burst size override (default: the rpm itself)
+      - ``backend``: ``memory`` (default) or ``redis`` (shared; injected)
+      - ``fail_open``: allow requests when the shared backend is down (default true)
     """
 
     default_order: ClassVar[int] = 40
@@ -52,37 +69,54 @@ class RateLimitPlugin(Plugin):
             k: float(v) for k, v in (self.config.get("model_rpm") or {}).items()
         }
         self.identity_rpm: float | None = self.config.get("identity_rpm")
-        self._model_buckets: dict[str, TokenBucket] = {}
-        self._identity_buckets: dict[str, TokenBucket] = {}
+        self.capacity: float | None = (
+            float(self.config["capacity"]) if self.config.get("capacity") is not None else None
+        )
+        self.fail_open: bool = bool(self.config.get("fail_open", True))
+        self._backend: StateBackend = InMemoryBackend()
+        self._metrics = None
 
-    def _bucket(self, store: dict[str, TokenBucket], key: str, rpm: float) -> TokenBucket:
-        bucket = store.get(key)
-        if bucket is None or bucket.rate != rpm / 60.0:
-            bucket = TokenBucket(rpm)
-            store[key] = bucket
-        return bucket
+    def set_shared(self, backend: StateBackend, metrics: Any) -> None:
+        """Called by GatewayApp to inject the shared backend and metrics sink."""
+        self._backend = backend
+        self._metrics = metrics
 
-    def _limits_for(self, ctx: PluginContext) -> list[tuple[str, TokenBucket]]:
-        limits: list[tuple[str, TokenBucket]] = []
+    def _limits_for(self, ctx: PluginContext) -> list[tuple[str, float]]:
+        limits: list[tuple[str, float]] = []
         rpm = self.model_rpm.get(ctx.model, self.default_rpm)
         if rpm:
-            limits.append((f"model:{ctx.model}", self._bucket(self._model_buckets, ctx.model, float(rpm))))
+            limits.append((f"model:{ctx.model}", float(rpm)))
         identity = ctx.identity or {}
         identity_rpm = self.identity_rpm or identity.get("rpm")
         if identity_rpm:
             name = str(identity.get("name") or ctx.client_host or "anonymous")
-            limits.append(
-                (f"identity:{name}", self._bucket(self._identity_buckets, name, float(identity_rpm)))
-            )
+            limits.append((f"identity:{name}", float(identity_rpm)))
         return limits
 
     async def on_request(self, ctx: PluginContext) -> None:
-        for label, bucket in self._limits_for(ctx):
-            if not bucket.try_acquire():
-                from aigateway.plugins.base import logger as plugin_logger
+        from aigateway.plugins.base import logger as plugin_logger
 
-                plugin_logger.info("rate limit exceeded for %s", label)
+        for scope, rpm in self._limits_for(ctx):
+            try:
+                allowed, retry_after = await self._backend.acquire_bucket(
+                    scope, rpm, capacity=self.capacity or rpm
+                )
+            except StateBackendError as exc:
+                plugin_logger.warning("rate-limit backend unavailable (%s): %s", scope, exc)
+                self._record_backend_error()
+                if self.fail_open:
+                    continue
                 raise RateLimitError(
-                    f"Rate limit exceeded for {label}",
+                    "Rate limit backend unavailable",
+                    code="rate_limit_exceeded",
+                ) from exc
+            if not allowed:
+                plugin_logger.info("rate limit exceeded for %s", scope)
+                raise RateLimitError(
+                    f"Rate limit exceeded for {scope}",
                     code="rate_limit_exceeded",
                 )
+
+    def _record_backend_error(self) -> None:
+        if self._metrics is not None:
+            self._metrics.inc_state_backend_error("rate_limit")

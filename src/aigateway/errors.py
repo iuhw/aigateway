@@ -53,6 +53,11 @@ class RateLimitError(GatewayError):
     code = "rate_limit_exceeded"
 
 
+class PayloadTooLargeError(GatewayError):
+    status_code = 413
+    code = "payload_too_large"
+
+
 class NotFoundError(GatewayError):
     status_code = 404
     code = "not_found_error"

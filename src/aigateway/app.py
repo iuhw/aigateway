@@ -46,21 +46,41 @@ class GatewayApp:
         self.metrics = Metrics()
         self._watcher: ConfigWatcher | None = None
         self._watch_task: asyncio.Task | None = None
+        self._sync_task: asyncio.Task | None = None
+        self._shared_backend: Any = None
         self.state = self._build_state()
 
     # -- lifecycle ---------------------------------------------------------------
 
     def _build_state(self) -> GatewayState:
         config = ConfigWatcher(self.config_path).initialize()
+        if self._shared_backend is None:
+            self._shared_backend = self._build_shared_backend(config)
         return self._materialize(config)
 
+    def _build_shared_backend(self, config: GatewayConfig) -> Any:
+        from aigateway.state import build_backend
+
+        try:
+            return build_backend(config.section("shared_state"))
+        except Exception:
+            logger.exception("shared_state backend init failed; continuing without shared state")
+            return None
+
     def _materialize(self, config: GatewayConfig) -> GatewayState:
-        return GatewayState(
+        from aigateway.plugins.rate_limit import RateLimitPlugin
+
+        state = GatewayState(
             config=config,
             providers=config.build_providers(),
             router=config.build_router(),
             plugins=config.build_plugin_chain(),
         )
+        if self._shared_backend is not None:
+            for plugin in state.plugins.plugins:
+                if isinstance(plugin, RateLimitPlugin):
+                    plugin.set_shared(self._shared_backend, self.metrics)
+        return state
 
     async def start_config_watcher(self, interval_s: float = 5.0) -> None:
         if self._watch_task is not None:
@@ -75,6 +95,38 @@ class GatewayApp:
                     logger.exception("config watcher iteration failed")
         self._watch_task = asyncio.create_task(_loop())
         logger.info("config watcher started (interval %.1fs)", interval_s)
+        self._start_cooldown_syncer()
+
+    def _start_cooldown_syncer(self, interval_s: float = 2.0) -> None:
+        """Share deployment cooldowns across instances (Redis backend only)."""
+        from aigateway.state import RedisBackend
+
+        if self._sync_task is not None or not isinstance(self._shared_backend, RedisBackend):
+            return
+
+        async def _loop() -> None:
+            while True:
+                await asyncio.sleep(interval_s)
+                try:
+                    await self._cooldown_sync_once()
+                except Exception:  # noqa: BLE001
+                    logger.exception("cooldown sync iteration failed")
+
+        self._sync_task = asyncio.create_task(_loop())
+        logger.info("cooldown syncer started (interval %.1fs)", interval_s)
+
+    async def _cooldown_sync_once(self) -> None:
+        backend = self._shared_backend
+        if backend is None:
+            return
+        # Model names may contain ':', so composite keys use an explicit
+        # separator Redis keys never contain.
+        sep = "\x1f"
+        for model, deployment_key, remaining_s in self.state.router.export_cooldowns():
+            await backend.set_cooldown(f"{model}{sep}{deployment_key}", remaining_s)
+        for name, remaining_s in (await backend.fetch_cooldowns("")).items():
+            model, _, deployment_key = name.partition(sep)
+            self.state.router.impose_cooldown(model, deployment_key, remaining_s)
 
     async def reload_if_changed(self) -> bool:
         """Hot-reload config; rebuilds router/plugins, providers only if changed."""
@@ -84,6 +136,12 @@ class GatewayApp:
             return False
         old = self.state
         try:
+            if (old.config.section("shared_state") or {}) != (fresh.section("shared_state") or {}):
+                old_backend = self._shared_backend
+                self._shared_backend = None  # force rebuild
+                self._shared_backend = self._build_shared_backend(fresh)
+                if old_backend is not None:
+                    await old_backend.aclose()
             new_state = self._materialize(fresh)
         except Exception:
             logger.exception("config reload materialization failed; keeping previous state")
@@ -96,12 +154,17 @@ class GatewayApp:
         return True
 
     async def aclose(self) -> None:
-        if self._watch_task is not None:
-            self._watch_task.cancel()
-            self._watch_task = None
+        for task in (self._watch_task, self._sync_task):
+            if task is not None:
+                task.cancel()
+        self._watch_task = None
+        self._sync_task = None
         for provider in self.state.providers.values():
             await provider.aclose()
         await self.state.plugins.aclose()
+        if self._shared_backend is not None:
+            await self._shared_backend.aclose()
+            self._shared_backend = None
 
     # -- model metadata ------------------------------------------------------------
 
@@ -116,10 +179,37 @@ class GatewayApp:
 
     # -- chat completions -----------------------------------------------------------
 
+    def _server_limits(self) -> dict[str, Any]:
+        return self.state.config.section("server") or {}
+
+    def _check_request_limits(self, body: dict[str, Any]) -> None:
+        """Admission control independent of plugins (fail before any work)."""
+        limits = self._server_limits()
+        messages = body.get("messages")
+        if isinstance(messages, list):
+            max_messages = int(limits.get("max_messages", 128))
+            if len(messages) > max_messages:
+                from aigateway.errors import PayloadTooLargeError
+
+                raise PayloadTooLargeError(
+                    f"too many messages: {len(messages)} > {max_messages}"
+                )
+            max_chars = int(limits.get("max_message_chars", 200_000))
+            total_chars = sum(
+                len(str(m.get("content") or "")) for m in messages if isinstance(m, dict)
+            )
+            if total_chars > max_chars:
+                from aigateway.errors import PayloadTooLargeError
+
+                raise PayloadTooLargeError(
+                    f"messages too long: {total_chars} chars > {max_chars}"
+                )
+
     async def chat(
         self, body: dict[str, Any], headers: dict[str, str], client_host: str
     ) -> dict[str, Any] | AsyncIterator[str]:
         """Process a chat completion; returns the response body or an SSE generator."""
+        self._check_request_limits(body)
         request = ChatCompletionRequest(**body)
         payload = request.upstream_payload(stream=request.stream)
         ctx = PluginContext(
