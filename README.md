@@ -78,7 +78,7 @@ client ──► FastAPI (api.py)
 ## 测试与基准
 
 ```bash
-.venv/Scripts/python -m pytest tests/ -q        # 126 个测试（含故障注入/混沌/多实例/安全/热重载/停机）
+.venv/Scripts/python -m pytest tests/ -q        # 154 个测试（含故障注入/混沌/多实例/安全/热重载/停机）
 .venv/Scripts/python -m ruff check src tests    # lint
 .venv/Scripts/python benchmarks/bench_gateway.py  # 基准 → docs/benchmark-report.md
 
@@ -123,7 +123,7 @@ aigateway serve --config gateway.prod.yaml --port 8080
 - SLO 与验证证据：[docs/operations.md](docs/operations.md) §2
 - 告警规则与 runbook（Redis 故障、上游劣化、配置回滚等 6 类场景）：[docs/operations.md](docs/operations.md) §3-4
 - 已知生产边界（token 级限流、TLS 终结点、流式过滤窗口等）：[docs/operations.md](docs/operations.md) §5
-- CI（GitHub Actions）：lint + 126 测试 + 基准 smoke + Docker 构建/健康检查
+- CI（GitHub Actions）：lint + 154 测试 + 基准 smoke + Docker 构建/健康检查
 
 ## 项目结构
 
