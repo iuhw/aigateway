@@ -75,9 +75,117 @@ def test_translate_request_rejects_missing_max_tokens():
         translate_request(body)
 
 
-def test_translate_request_rejects_tools():
-    with pytest.raises(Exception, match="tools"):
-        translate_request(anthropic_body(tools=[{"name": "x"}]))
+def test_translate_request_tools():
+    payload = translate_request(
+        anthropic_body(
+            tools=[
+                {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}},
+                }
+            ],
+            tool_choice={"type": "any"},
+        )
+    )
+    assert payload["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+            },
+        }
+    ]
+    assert payload["tool_choice"] == "required"
+
+
+@pytest.mark.parametrize(
+    "choice,expected",
+    [
+        ({"type": "auto"}, "auto"),
+        ({"type": "any"}, "required"),
+        ({"type": "none"}, "none"),
+        ({"type": "tool", "name": "f"}, {"type": "function", "function": {"name": "f"}}),
+    ],
+)
+def test_translate_request_tool_choice_mapping(choice, expected):
+    payload = translate_request(anthropic_body(tools=[{"name": "f"}], tool_choice=choice))
+    assert payload["tool_choice"] == expected
+
+
+def test_translate_request_tool_round_messages():
+    payload = translate_request(
+        anthropic_body(
+            messages=[
+                {"role": "user", "content": "weather in Paris?"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "let me check"},
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_1",
+                            "name": "get_weather",
+                            "input": {"city": "Paris"},
+                        },
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_1", "content": "18C sunny"},
+                        {"type": "text", "text": "thanks"},
+                    ],
+                },
+            ]
+        )
+    )
+    assert payload["messages"][0] == {"role": "user", "content": "weather in Paris?"}
+    assistant = payload["messages"][1]
+    assert assistant["role"] == "assistant"
+    assert assistant["content"] == "let me check"
+    assert assistant["tool_calls"] == [
+        {
+            "id": "toolu_1",
+            "type": "function",
+            "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'},
+        }
+    ]
+    # tool messages come before the user's follow-up text
+    assert payload["messages"][2] == {"role": "tool", "tool_call_id": "toolu_1", "content": "18C sunny"}
+    assert payload["messages"][3] == {"role": "user", "content": "thanks"}
+
+
+def test_translate_request_tool_only_assistant_turn():
+    payload = translate_request(
+        anthropic_body(
+            messages=[
+                {"role": "user", "content": "go"},
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "t1", "name": "f", "input": {}}],
+                },
+            ]
+        )
+    )
+    assistant = payload["messages"][1]
+    assert assistant["content"] is None
+    assert assistant["tool_calls"][0]["function"]["arguments"] == "{}"
+
+
+def test_translate_request_rejects_malformed_tools():
+    with pytest.raises(Exception, match="name"):
+        translate_request(anthropic_body(tools=[{"description": "no name"}]))
+    with pytest.raises(Exception, match="tool_choice"):
+        translate_request(anthropic_body(tools=[{"name": "f"}], tool_choice={"type": "weird"}))
+    with pytest.raises(Exception, match="tool_use"):
+        translate_request(
+            anthropic_body(
+                messages=[{"role": "assistant", "content": [{"type": "tool_use", "name": "f", "input": {}}]}]
+            )
+        )
 
 
 def test_translate_request_rejects_images():
@@ -172,6 +280,86 @@ async def test_stream_mid_stream_error_event():
     assert events[-1][1]["error"]["type"] == "api_error"
     # no message_stop after an error
     assert "message_stop" not in [n for n, _ in events]
+
+
+async def test_stream_tool_call_events():
+    chunks = [
+        {"choices": [{"delta": {"content": "checking "}}]},
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "get_weather", "arguments": ""},
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '{"ci'}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": 'ty": "Paris"}'}}]}}]},
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        {"usage": {"prompt_tokens": 9, "completion_tokens": 7, "total_tokens": 16}},
+    ]
+    events = await _collect_events(chunks)
+    names = [name for name, _ in events]
+    assert names == [
+        "message_start",
+        "content_block_start",  # text block
+        "content_block_delta",
+        "content_block_start",  # tool_use block
+        "content_block_delta",
+        "content_block_delta",
+        "content_block_stop",  # text block (deferred close, index order)
+        "content_block_stop",  # tool block
+        "message_delta",
+        "message_stop",
+    ]
+    tool_start = events[3][1]
+    assert tool_start["index"] == 1
+    assert tool_start["content_block"] == {
+        "type": "tool_use",
+        "id": "call_1",
+        "name": "get_weather",
+        "input": {},
+    }
+    json_deltas = [
+        d for n, d in events if n == "content_block_delta" and d["delta"]["type"] == "input_json_delta"
+    ]
+    assert "".join(d["delta"]["partial_json"] for d in json_deltas) == '{"city": "Paris"}'
+    assert events[-2][1]["delta"]["stop_reason"] == "tool_use"
+    assert events[-2][1]["usage"]["output_tokens"] == 7
+
+
+async def test_stream_tool_call_without_text_block():
+    chunks = [
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {"index": 0, "id": "call_9", "function": {"name": "f", "arguments": "{}"}}
+                        ]
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        },
+    ]
+    events = await _collect_events(chunks)
+    names = [name for name, _ in events]
+    assert names == [
+        "message_start", "content_block_start", "content_block_delta",
+        "content_block_stop", "message_delta", "message_stop",
+    ]
+    assert events[1][1]["index"] == 0  # tool block is the first block
+    assert events[1][1]["content_block"]["type"] == "tool_use"
+    assert events[2][1]["delta"]["partial_json"] == "{}"
 
 
 # ---- end-to-end over HTTP -----------------------------------------------------------

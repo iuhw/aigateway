@@ -86,11 +86,14 @@
 
 1. **token 级限流**基于估算预扣 + 完成后按上游实际用量多退少补；估算用 ~4 字符/token 启发式
    （未带 `max_tokens` 时按 512 计）。窗口边界处固定窗口允许最多 2x 突发（与 Kong 相同取舍）。
-2. **Anthropic 兼容面为文本补全范围**：`/v1/messages` 支持 system/text blocks/stop_sequences/
-   temperature/top_p/max_tokens 与完整流式事件；tools、图片、citations 明确拒绝（400）。
+2. **Anthropic 兼容面**：`/v1/messages` 支持 system/text blocks/stop_sequences/temperature/
+   top_p/max_tokens、完整流式事件与 **tools**（定义、tool_choice、tool_use/tool_result 块、
+   流式 tool 参数事件）；图片与 citations 明确拒绝（400）。
 3. **单机网络栈**：SO_REUSEPORT 多进程 / k8s 多 Pod 均可，但网关不提供 TLS——在入口层终结。
 4. **流式 block 过滤的窗口**：检测到关键词前的块已发出（与 Higress 同类插件的已知取舍）。
-5. **仅 OpenAI 协议上游**：上游侧统一为 OpenAI 协议；客户端侧提供 OpenAI + Anthropic 双协议。
+5. **上游协议面**：OpenAI 协议（openai）+ 原生适配器 anthropic / gemini / bedrock（Converse，
+   SigV4 纯标准库实现）。适配器覆盖 chat + tools（含流式）；**embeddings 仅 openai 类型支持**——
+   不支持的部署按传输故障语义处理，调度器自动切换到支持 embeddings 的部署。
 6. **缓存为单键精确匹配**（进程内——同副本重复请求才命中；跨副本响应缓存在路线图）。
 7. **成本追踪**按 `pricing` 配置的静态单价计算（无分层阶梯/折扣价）；`usage` 缺失时 token 用量为
    ~4 字符/token 估算，估算口径下成本同样为近似值。

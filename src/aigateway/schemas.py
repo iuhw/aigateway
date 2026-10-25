@@ -47,6 +47,39 @@ class ChatCompletionRequest(BaseModel):
         return payload
 
 
+class EmbeddingRequest(BaseModel):
+    """/v1/embeddings request; `input` is a string, list of strings, or list
+    of token-id arrays (per the OpenAI schema)."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    model: str
+    input: str | list[str] | list[list[int]]
+    encoding_format: str | None = None
+    dimensions: int | None = None
+
+    def upstream_payload(self) -> dict[str, Any]:
+        """Serialize for the upstream provider; `model` is re-injected by the
+        dispatcher per deployment, mirroring chat completions."""
+        return self.model_dump(exclude={"model"}, exclude_unset=True)
+
+
+def embedding_request_text(payload: dict[str, Any]) -> str:
+    """Plain text of an embeddings request, for scanning and estimation."""
+    value = payload.get("input")
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, list):  # token-id array: text is unknown
+                parts.append(" ".join(str(token) for token in item))
+        return "\n".join(parts)
+    return ""
+
+
 def message_text(message: dict[str, Any]) -> str:
     """Best-effort plain-text extraction from a chat message for text scans."""
     content = message.get("content")

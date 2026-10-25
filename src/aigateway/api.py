@@ -161,6 +161,21 @@ def create_app(config_path: str, *, config_watcher: bool = True) -> FastAPI:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    @app.post("/v1/embeddings")
+    async def embeddings(request: Request) -> Response:
+        """OpenAI-compatible embeddings; served through the same auth/plugin/
+        routing/failover pipeline as chat completions (non-streaming only)."""
+        raw = await _read_body(request)
+        try:
+            body: dict[str, Any] = json.loads(raw)
+        except Exception as exc:
+            raise BadRequestError(f"request body must be valid JSON: {exc}") from exc
+        if not isinstance(body, dict):
+            raise BadRequestError("request body must be a JSON object")
+        client_host = request.client.host if request.client else ""
+        result = await gateway.embeddings(body, dict(request.headers), client_host)
+        return JSONResponse(status_code=200, content=result)
+
     @app.get("/v1/models")
     async def list_models() -> dict[str, Any]:
         return {

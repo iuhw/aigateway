@@ -19,7 +19,9 @@ from aigateway.observability.metrics import Metrics
 from aigateway.plugins.base import PluginChain, PluginContext
 from aigateway.schemas import (
     ChatCompletionRequest,
+    EmbeddingRequest,
     chunk_text,
+    embedding_request_text,
     estimate_tokens,
     request_text,
     response_text,
@@ -205,6 +207,21 @@ class GatewayApp:
                     f"messages too long: {total_chars} chars > {max_chars}"
                 )
 
+    def _check_embedding_limits(self, body: dict[str, Any]) -> None:
+        """Admission control for embeddings (mirrors _check_request_limits)."""
+        from aigateway.errors import PayloadTooLargeError
+
+        limits = self._server_limits()
+        inputs = body.get("input")
+        if isinstance(inputs, list):
+            max_inputs = int(limits.get("max_messages", 128))
+            if len(inputs) > max_inputs:
+                raise PayloadTooLargeError(f"too many embedding inputs: {len(inputs)} > {max_inputs}")
+        total_chars = len(embedding_request_text(body))
+        max_chars = int(limits.get("max_message_chars", 200_000))
+        if total_chars > max_chars:
+            raise PayloadTooLargeError(f"embedding input too long: {total_chars} chars > {max_chars}")
+
     async def chat(
         self, body: dict[str, Any], headers: dict[str, str], client_host: str
     ) -> dict[str, Any] | AsyncIterator[str]:
@@ -241,6 +258,69 @@ class GatewayApp:
             if request.stream:
                 return self._chat_streaming(ctx, route, started)
             return await self._chat_non_streaming(ctx, route, started)
+        except GatewayError as exc:
+            self._finish_error(ctx, exc, started)
+            raise
+
+    # -- embeddings ------------------------------------------------------------------
+
+    async def embeddings(
+        self, body: dict[str, Any], headers: dict[str, str], client_host: str
+    ) -> dict[str, Any]:
+        """Process an embeddings request through the same plugin/routing pipeline."""
+        self._check_embedding_limits(body)
+        request = EmbeddingRequest(**body)
+        payload = request.upstream_payload()
+        ctx = PluginContext(
+            request_id=uuid.uuid4().hex,
+            model=request.model,
+            payload=payload,
+            stream=False,
+            headers=dict(headers),
+            client_host=client_host,
+        )
+        started = time.perf_counter()
+
+        try:
+            route = self.state.router.route(request.model)
+            if route is None:
+                raise NotFoundError(f"model {request.model!r} is not configured")
+
+            await self.state.plugins.run_request(ctx)
+
+            if ctx.cache_hit and ctx.response is not None:
+                ctx.status_code = 200
+                ctx.latency_s = time.perf_counter() - started
+                self._record_usage_from_body(ctx, ctx.response)
+                self._metrics_finish(ctx)
+                await self.state.plugins.run_response(ctx)
+                return ctx.response  # type: ignore[return-value]
+
+            result = await self.state_dispatcher().execute_embedding(route, payload)
+            ctx.route = result.route
+            ctx.deployment = result.deployment
+            ctx.latency_s = time.perf_counter() - started
+            body_out = result.body
+
+            usage = body_out.get("usage")
+            if isinstance(usage, dict) and usage.get("total_tokens") is not None:
+                ctx.prompt_tokens = usage.get("prompt_tokens")
+                ctx.completion_tokens = usage.get("completion_tokens") or 0
+                ctx.usage_reported = True
+            else:
+                ctx.prompt_tokens = estimate_tokens(embedding_request_text(payload))
+                ctx.completion_tokens = 0
+            ctx.response = body_out
+            ctx.status_code = 200
+
+            try:
+                await self.state.plugins.run_response(ctx)
+            except GatewayError:
+                ctx.response = None
+                raise
+
+            self._metrics_finish(ctx)
+            return body_out
         except GatewayError as exc:
             self._finish_error(ctx, exc, started)
             raise

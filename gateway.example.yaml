@@ -38,6 +38,25 @@ providers:
   #   type: openai
   #   base_url: https://api.openai.com/v1
   #   api_key: ${OPENAI_API_KEY}
+  # Native protocol adapters: the gateway speaks OpenAI internally and
+  # translates to/from these upstreams, so one public model can chain
+  # deployments across vendors (e.g. anthropic primary, openai fallback).
+  # anthropic:
+  #   type: anthropic
+  #   api_key: sk-ant-...
+  #   # base_url: https://api.anthropic.com   (default)
+  #   # default_max_tokens: 4096              (Anthropic requires max_tokens)
+  # gemini:
+  #   type: gemini
+  #   api_key: AIza...
+  #   # base_url: https://generativelanguage.googleapis.com  (default)
+  # bedrock:
+  #   type: bedrock
+  #   region: us-east-1
+  #   # credentials fall back to AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
+  #   # AWS_SESSION_TOKEN environment variables when omitted here
+  #   # access_key_id: AKIA...
+  #   # secret_access_key: ...
 
 # ---- model routes ---------------------------------------------------------
 # Each public model name maps to one or more deployments. Routing strategies:

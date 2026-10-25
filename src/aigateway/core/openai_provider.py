@@ -69,14 +69,14 @@ class OpenAICompatibleProvider(Provider):
         self._client = httpx.AsyncClient(**client_kwargs)
         self.supports_stream_usage_option = supports_stream_usage_option
 
-    async def chat(self, *, model: str, payload: dict[str, Any], timeout: float) -> ProviderResult:
+    async def _post_json(
+        self, path: str, json_body: dict[str, Any], timeout: float
+    ) -> tuple[int, dict[str, Any], float]:
+        """POST JSON, returning (status, parsed-body, latency). Transport errors
+        raise UpstreamUnavailable; non-JSON bodies are wrapped as error dicts."""
         started = time.perf_counter()
         try:
-            response = await self._client.post(
-                "/chat/completions",
-                json={**payload, "model": model, "stream": False},
-                timeout=_timeout(timeout),
-            )
+            response = await self._client.post(path, json=json_body, timeout=_timeout(timeout))
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             raise UpstreamUnavailable(f"{self.name}: {type(exc).__name__}: {exc}") from exc
         latency = time.perf_counter() - started
@@ -86,7 +86,17 @@ class OpenAICompatibleProvider(Provider):
             body = {"error": {"message": response.text[:512], "type": "upstream_invalid_body"}}
         if not isinstance(body, dict):
             body = {"error": {"message": str(body)[:512], "type": "upstream_invalid_body"}}
-        return ProviderResult(status=response.status_code, body=body, latency_s=latency)
+        return response.status_code, body, latency
+
+    async def chat(self, *, model: str, payload: dict[str, Any], timeout: float) -> ProviderResult:
+        status, body, latency = await self._post_json(
+            "/chat/completions", {**payload, "model": model, "stream": False}, timeout
+        )
+        return ProviderResult(status=status, body=body, latency_s=latency)
+
+    async def embed(self, *, model: str, payload: dict[str, Any], timeout: float) -> ProviderResult:
+        status, body, latency = await self._post_json("/embeddings", {**payload, "model": model}, timeout)
+        return ProviderResult(status=status, body=body, latency_s=latency)
 
     async def stream(
         self, *, model: str, payload: dict[str, Any], timeout: float

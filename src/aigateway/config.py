@@ -48,6 +48,39 @@ class GatewayConfig:
                     extra_headers=spec.get("extra_headers"),
                     supports_stream_usage_option=bool(spec.get("supports_stream_usage_option", False)),
                 )
+            elif kind == "anthropic":
+                from aigateway.core.anthropic_provider import AnthropicProvider
+
+                providers[name] = AnthropicProvider(
+                    name,
+                    base_url=spec.get("base_url", "https://api.anthropic.com"),
+                    api_key=spec.get("api_key"),
+                    api_version=str(spec.get("api_version", "2023-06-01")),
+                    default_max_tokens=int(spec.get("default_max_tokens", 4096)),
+                )
+            elif kind == "gemini":
+                from aigateway.core.gemini_provider import GeminiProvider
+
+                providers[name] = GeminiProvider(
+                    name,
+                    base_url=spec.get("base_url", "https://generativelanguage.googleapis.com"),
+                    api_key=spec.get("api_key"),
+                    api_version=str(spec.get("api_version", "v1beta")),
+                )
+            elif kind == "bedrock":
+                from aigateway.core.bedrock_provider import BedrockProvider
+
+                if not spec.get("region"):
+                    raise BadRequestError(f"provider {name!r}: bedrock requires 'region'")
+                providers[name] = BedrockProvider(
+                    name,
+                    region=str(spec["region"]),
+                    access_key_id=spec.get("access_key_id"),
+                    secret_access_key=spec.get("secret_access_key"),
+                    session_token=spec.get("session_token"),
+                    base_url=spec.get("base_url"),
+                    default_max_tokens=int(spec.get("default_max_tokens", 4096)),
+                )
             elif kind == "mock":
                 from aigateway.core.mock_provider import MockProvider
 

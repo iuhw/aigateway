@@ -10,8 +10,11 @@ Envoy AI Gateway 的成熟设计自主实现（调研见 [docs/](docs/)）。
 **网关级**
 
 - **双协议入口**：OpenAI 兼容 `POST /v1/chat/completions` + **Anthropic Messages API `POST /v1/messages`**
-  （非流式 + 流式事件翻译，Claude SDK 可直接接入；文本补全范围内支持 tools 之外的完整协议）
-- 多上游：一切 OpenAI 协议服务（OpenAI / Ollama / vLLM / DeepSeek / Groq / LM Studio …）
+  （非流式 + 流式事件翻译，Claude SDK 可直接接入；支持 **tools**（定义/tool_choice/tool_use/tool_result 块
+  与流式 `input_json_delta` 事件翻译）；另有 **`POST /v1/embeddings`** 走同一套认证/路由/故障转移管道）
+- 多上游：一切 OpenAI 协议服务（OpenAI / Ollama / vLLM / DeepSeek / Groq / LM Studio …），
+  以及 **原生协议适配器**（`type: anthropic` / `type: gemini` / `type: bedrock`，含 SigV4 签名）——
+  同一公开模型可跨厂商组合部署与降级
 - 路由：模型 → 多部署映射，round-robin / weighted / least-latency 负载均衡，优先级分层（priority tier）
 - 可靠性：超时、指数退避重试、部署间故障转移、模型级降级链（fallbacks）、
   连续失败冷却熔断（cooldown，借鉴 LiteLLM）、流式首块前可无感切换
@@ -78,7 +81,7 @@ client ──► FastAPI (api.py)
 ## 测试与基准
 
 ```bash
-.venv/Scripts/python -m pytest tests/ -q        # 154 个测试（含故障注入/混沌/多实例/安全/热重载/停机）
+.venv/Scripts/python -m pytest tests/ -q        # 194 个测试（含故障注入/混沌/多实例/安全/热重载/停机/tools/embeddings）
 .venv/Scripts/python -m ruff check src tests    # lint
 .venv/Scripts/python benchmarks/bench_gateway.py  # 基准 → docs/benchmark-report.md
 
@@ -123,13 +126,13 @@ aigateway serve --config gateway.prod.yaml --port 8080
 - SLO 与验证证据：[docs/operations.md](docs/operations.md) §2
 - 告警规则与 runbook（Redis 故障、上游劣化、配置回滚等 6 类场景）：[docs/operations.md](docs/operations.md) §3-4
 - 已知生产边界（token 级限流、TLS 终结点、流式过滤窗口等）：[docs/operations.md](docs/operations.md) §5
-- CI（GitHub Actions）：lint + 154 测试 + 基准 smoke + Docker 构建/健康检查
+- CI（GitHub Actions）：lint + 194 测试 + 基准 smoke + Docker 构建/健康检查
 
 ## 项目结构
 
 ```
 src/aigateway/
-  api.py            FastAPI 适配层（OpenAI + Anthropic 双协议、错误映射、请求上限、运维端点）
+  api.py            FastAPI 适配层（OpenAI + Anthropic 双协议、embeddings、错误映射、请求上限、运维端点）
   anthropic_api.py  Anthropic Messages 协议翻译（请求/响应/流式事件/错误信封）
   app.py            GatewayApp 编排（插件链→路由→调度→插件链→计量→成本）
   config.py         YAML 配置、构建器、热重载 watcher（纳秒 mtime 防抖）
@@ -137,8 +140,12 @@ src/aigateway/
   schemas.py        OpenAI 兼容请求 schema 与文本抽取工具
   errors.py         OpenAI 风格错误体系
   core/
-    provider.py     Provider 抽象（chat / stream / health）
+    provider.py     Provider 抽象（chat / stream / embed / health）
     openai_provider.py   OpenAI 协议 HTTP 上游（可注入 transport 供故障注入）
+    anthropic_provider.py  Anthropic Messages 原生上游（双向协议翻译）
+    gemini_provider.py     Gemini generateContent 原生上游
+    bedrock_provider.py    AWS Bedrock Converse 原生上游
+    sigv4.py            AWS SigV4 请求签名（纯标准库，botocore 交叉验证）
     mock_provider.py     确定性 mock（测试/基准）
     router.py       路由、负载均衡、冷却、优先级分层、冷却导入导出
     dispatcher.py   重试/退避/故障转移/降级链/流式切换
@@ -146,7 +153,7 @@ src/aigateway/
     base.py         Plugin 接口、PluginChain、注册表、外部加载
     keyword_filter.py / auth.py / rate_limit.py / response_cache.py / request_log.py
   observability/metrics.py   Prometheus 指标（含成本）
-tests/              154 tests（单元/集成/wire 故障注入/混沌/多实例/安全/热重载/停机/Anthropic/token/cost）
+tests/              194 tests（单元/集成/wire 故障注入/混沌/多实例/安全/热重载/停机/Anthropic/tools/embeddings/原生适配器）
 benchmarks/         基准测试（--quick 供 CI）
 scripts/            负载测试、soak 耐久、并行下载器、Ollama 安装、E2E 验证（13 项）
 deploy/             生产配置、Prometheus 抓取、Grafana 仪表盘与数据源

@@ -15,9 +15,12 @@ def cache_key(model: str, payload: dict[str, Any]) -> str:
     normalized = {
         "model": model,
         "messages": payload.get("messages", []),
+        "input": payload.get("input"),  # embeddings: distinct inputs must not collide
         "tools": payload.get("tools"),
         "tool_choice": payload.get("tool_choice"),
         "response_format": payload.get("response_format"),
+        "encoding_format": payload.get("encoding_format"),
+        "dimensions": payload.get("dimensions"),
         "temperature": payload.get("temperature"),
         "top_p": payload.get("top_p"),
         "max_tokens": payload.get("max_tokens"),

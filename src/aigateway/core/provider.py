@@ -71,6 +71,15 @@ class Provider(ABC):
     async def health(self) -> bool:
         """Cheap liveness probe used by /readyz."""
 
+    async def embed(self, *, model: str, payload: dict[str, Any], timeout: float) -> ProviderResult:
+        """Perform an embedding request (any HTTP status is returned, not raised).
+
+        The default raises UpstreamUnavailable — transport-failure semantics —
+        so the dispatcher fails over to a deployment whose provider does
+        support embeddings instead of aborting the route.
+        """
+        raise UpstreamUnavailable(f"{self.name}: provider does not support embeddings")
+
     async def aclose(self) -> None:
         """Release underlying resources."""
 

@@ -8,7 +8,9 @@ gateway overhead against a near-zero-latency upstream.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import itertools
+import json
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -35,6 +37,7 @@ class MockProvider(Provider):
         prompt_tokens: int = 12,
         completion_tokens: int = 20,
         healthy: bool = True,
+        embedding_dim: int = 8,
     ):
         super().__init__(name)
         self.latency_s = latency_s
@@ -46,6 +49,7 @@ class MockProvider(Provider):
         self.prompt_tokens = prompt_tokens
         self.completion_tokens = completion_tokens
         self.healthy = healthy
+        self.embedding_dim = max(1, embedding_dim)
         self.call_count = 0
         self._ids = itertools.count(1)
 
@@ -99,6 +103,53 @@ class MockProvider(Provider):
                 "completion_tokens": self.completion_tokens,
                 "total_tokens": self.prompt_tokens + self.completion_tokens,
             },
+        }
+        return ProviderResult(status=200, body=body, latency_s=time.perf_counter() - started)
+
+    def _embedding_of(self, text: Any) -> list[float]:
+        """Deterministic unit-free vector from the SHA-256 of the input text."""
+        source = text if isinstance(text, str) else json.dumps(text, default=str)
+        seed = hashlib.sha256(source.encode("utf-8")).digest()
+        values: list[float] = []
+        counter = 0
+        while len(values) < self.embedding_dim:
+            for byte in seed:
+                if len(values) >= self.embedding_dim:
+                    break
+                values.append(round(byte / 127.5 - 1.0, 6))
+            counter += 1
+            seed = hashlib.sha256(f"{source}:{counter}".encode()).digest()
+        return values
+
+    async def embed(self, *, model: str, payload: dict[str, Any], timeout: float) -> ProviderResult:
+        started = time.perf_counter()
+        if not self.healthy:
+            return ProviderResult(
+                status=503,
+                body={"error": {"message": f"provider {self.name} is unhealthy", "type": "server_error"}},
+                latency_s=0.0,
+            )
+        if (status := self._maybe_fail()) is not None:
+            return ProviderResult(
+                status=status,
+                body={"error": {"message": f"mock failure from {self.name}", "type": "server_error"}},
+                latency_s=time.perf_counter() - started,
+            )
+        inputs = payload.get("input")
+        texts = [inputs] if isinstance(inputs, str) else list(inputs or [])
+        data = [
+            {"object": "embedding", "index": i, "embedding": self._embedding_of(text)}
+            for i, text in enumerate(texts)
+        ]
+        prompt_tokens = sum(
+            max(1, len(text) // 4) if isinstance(text, str) else max(1, len(text))
+            for text in texts
+        ) or 1
+        body = {
+            "object": "list",
+            "data": data,
+            "model": model,
+            "usage": {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens},
         }
         return ProviderResult(status=200, body=body, latency_s=time.perf_counter() - started)
 

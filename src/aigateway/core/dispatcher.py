@@ -17,12 +17,12 @@ from __future__ import annotations
 import asyncio
 import random
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
 from aigateway.core.openai_provider import UpstreamStreamError
-from aigateway.core.provider import Provider, UpstreamUnavailable
+from aigateway.core.provider import Provider, ProviderResult, UpstreamUnavailable
 from aigateway.core.router import Deployment, ModelRoute, Router
 from aigateway.errors import AllDeploymentsFailedError, GatewayError, UpstreamError
 
@@ -35,6 +35,10 @@ def is_retryable_status(status: int) -> bool:
 
 def _backoff(base_s: float, attempt: int) -> float:
     return min(base_s * (2**attempt), 8.0) + random.uniform(0, base_s * 0.1)
+
+
+#: Per-attempt upstream invocation: (provider, deployment, timeout) -> result.
+Invoke = Callable[[Provider, Deployment, float], Awaitable["ProviderResult"]]
 
 
 @dataclass
@@ -79,6 +83,23 @@ class Dispatcher:
 
     async def execute(self, route: ModelRoute, payload: dict[str, Any]) -> ExecutionResult:
         """Run a non-streaming chat completion through retry/failover/fallback."""
+
+        async def invoke(provider: Provider, deployment: Deployment, timeout: float) -> ProviderResult:
+            return await provider.chat(model=deployment.model, payload=payload, timeout=timeout)
+
+        return await self._execute(route, invoke)
+
+    async def execute_embedding(self, route: ModelRoute, payload: dict[str, Any]) -> ExecutionResult:
+        """Run an embeddings request through the same retry/failover/fallback
+        machinery. Providers without embedding support raise UpstreamUnavailable
+        (transport semantics), so the route fails over to one that does."""
+
+        async def invoke(provider: Provider, deployment: Deployment, timeout: float) -> ProviderResult:
+            return await provider.embed(model=deployment.model, payload=payload, timeout=timeout)
+
+        return await self._execute(route, invoke)
+
+    async def _execute(self, route: ModelRoute, invoke: Invoke) -> ExecutionResult:
         attempts_total = 0
         last_error: GatewayError | None = None
 
@@ -98,11 +119,7 @@ class Dispatcher:
                 for attempt in range(per_deployment_attempts):
                     attempts_total += 1
                     try:
-                        result = await provider.chat(
-                            model=deployment.model,
-                            payload=payload,
-                            timeout=current_route.policy.timeout_s,
-                        )
+                        result = await invoke(provider, deployment, current_route.policy.timeout_s)
                     except UpstreamUnavailable as exc:
                         last_error = exc
                         self.router.report_failure(deployment, current_route)
