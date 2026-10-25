@@ -168,7 +168,7 @@ tests/              251 tests（单元/集成/wire 故障注入/混沌/多实例
 benchmarks/         基准测试（--quick 供 CI）
 scripts/            负载测试、soak 耐久、并行下载器、Ollama 安装、E2E 验证（13 项）
 deploy/             生产配置、Prometheus 抓取、Grafana 仪表盘与数据源
-docs/               调研（3 篇）、基准/负载/soak/E2E 报告、运维手册
+docs/               调研（3 篇）、项目蓝图与复盘、基准/负载/soak/E2E 报告、运维手册
 ```
 
 ## License
