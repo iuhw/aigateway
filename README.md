@@ -80,7 +80,8 @@ client ──► FastAPI (api.py)
 ```
 
 详细设计（含与各主流网关的决策对照、失败模型、流式掩码算法）：
-[docs/research-summary.md](docs/research-summary.md)。
+[docs/research-summary.md](docs/research-summary.md)；后续演进规划见项目蓝图
+[docs/BLUEPRINT.md](docs/BLUEPRINT.md)。
 
 ## 测试与基准
 
