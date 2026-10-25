@@ -26,7 +26,7 @@ jobs:
         run: uv run --no-sync ruff check src tests scripts benchmarks
 
       - name: Tests
-        run: uv run --no-sync pytest tests/ -q
+        run: uv run --no-sync python -m pytest tests/ -q
 
       - name: Benchmark smoke (small n, CI variance tolerated)
         run: uv run --no-sync python benchmarks/bench_gateway.py --quick --out /tmp/bench.md --json /tmp/bench.json

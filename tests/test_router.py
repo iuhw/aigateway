@@ -67,7 +67,11 @@ def test_cooldown_expires():
     router, route = make_router(allowed_fails=1, cooldown_s=0.05)
     router.report_failure(route.deployments[0], route)
     assert route.deployments[0].is_cooling_down()
-    time.sleep(0.06)
+    # Poll instead of a fixed sleep: time.sleep can return early under coarse
+    # OS timer resolution, and the test must not depend on that precision.
+    deadline = time.monotonic() + 2.0
+    while route.deployments[0].is_cooling_down() and time.monotonic() < deadline:
+        time.sleep(0.005)
     assert not route.deployments[0].is_cooling_down()
     assert router.pick(route) is not None
 
