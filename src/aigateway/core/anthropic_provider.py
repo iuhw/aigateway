@@ -157,12 +157,41 @@ def from_anthropic_response(body: dict[str, Any], *, model: str) -> dict[str, An
                 "finish_reason": ANTHROPIC_STOP_REASON_TO_OPENAI.get(body.get("stop_reason"), "stop"),
             }
         ],
-        "usage": {
-            "prompt_tokens": usage.get("input_tokens", 0),
-            "completion_tokens": usage.get("output_tokens", 0),
-            "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
-        },
+        "usage": _openai_usage(
+            input_tokens=usage.get("input_tokens"),
+            cache_read=usage.get("cache_read_input_tokens"),
+            cache_write=usage.get("cache_creation_input_tokens"),
+            completion_tokens=usage.get("output_tokens"),
+        ),
     }
+
+
+def _openai_usage(
+    *,
+    input_tokens: int | None,
+    cache_read: int | None,
+    cache_write: int | None,
+    completion_tokens: int | None,
+) -> dict[str, int]:
+    """OpenAI-style usage where prompt_tokens covers the whole prompt, with the
+    cached portions broken out (`cache_read_tokens` / `cache_write_tokens` —
+    the gateway convention for tiered pricing). Anthropic/Bedrock report the
+    uncached input separately from cache reads/writes; OpenAI/Gemini include
+    cache reads in prompt_tokens already."""
+    input_tokens = int(input_tokens or 0)
+    cache_read = int(cache_read or 0)
+    cache_write = int(cache_write or 0)
+    completion = int(completion_tokens or 0)
+    prompt = input_tokens + cache_read + cache_write
+    usage: dict[str, int] = {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": prompt + completion,
+    }
+    if cache_read or cache_write:
+        usage["cache_read_tokens"] = cache_read
+        usage["cache_write_tokens"] = cache_write
+    return usage
 
 
 def _openai_chunk(
@@ -190,6 +219,8 @@ async def anthropic_stream_to_openai(
     block_to_call: dict[int, int] = {}
     next_call_index = 0
     input_tokens: int | None = None
+    cache_read: int | None = None
+    cache_write: int | None = None
     output_tokens: int | None = None
     finish_reason: str | None = None
 
@@ -205,7 +236,10 @@ async def anthropic_stream_to_openai(
         if event_type == "message_start":
             message = event.get("message") or {}
             chunk_id = f"chatcmpl-{str(message.get('id') or 'anthropic-stream')}"
-            input_tokens = (message.get("usage") or {}).get("input_tokens")
+            start_usage = message.get("usage") or {}
+            input_tokens = start_usage.get("input_tokens")
+            cache_read = start_usage.get("cache_read_input_tokens")
+            cache_write = start_usage.get("cache_creation_input_tokens")
             yield _openai_chunk(chunk_id, model, {"role": "assistant", "content": ""}, created=created)
         elif event_type == "content_block_start":
             block = event.get("content_block") or {}
@@ -262,11 +296,12 @@ async def anthropic_stream_to_openai(
 
     usage: dict[str, int] | None = None
     if input_tokens is not None or output_tokens is not None:
-        usage = {
-            "prompt_tokens": input_tokens or 0,
-            "completion_tokens": output_tokens or 0,
-            "total_tokens": (input_tokens or 0) + (output_tokens or 0),
-        }
+        usage = _openai_usage(
+            input_tokens=input_tokens,
+            cache_read=cache_read,
+            cache_write=cache_write,
+            completion_tokens=output_tokens,
+        )
     final = _openai_chunk(chunk_id, model, {}, finish_reason or "stop", created=created)
     if usage:
         final["usage"] = usage

@@ -20,12 +20,13 @@ from aigateway.plugins.base import PluginChain, PluginContext
 from aigateway.schemas import (
     ChatCompletionRequest,
     EmbeddingRequest,
+    cache_tokens_of,
     chunk_text,
     embedding_request_text,
-    estimate_tokens,
     request_text,
     response_text,
 )
+from aigateway.tokenizers import TokenEstimator, build_tokenizer
 
 logger = logging.getLogger("aigateway.app")
 
@@ -51,7 +52,9 @@ class GatewayApp:
         self._sync_task: asyncio.Task | None = None
         self._shared_backend: Any = None
         self._watcher = ConfigWatcher(self.config_path)
+        self.tokenizer: TokenEstimator = build_tokenizer(None)  # replaced below once config loads
         self.state = self._build_state()
+        self._apply_tokenizer_config()
 
     # -- lifecycle ---------------------------------------------------------------
 
@@ -80,9 +83,15 @@ class GatewayApp:
             router=config.build_router(),
             plugins=config.build_plugin_chain(),
         )
+        for plugin in state.plugins.plugins:
+            plugin.estimator = self.tokenizer
         if self._shared_backend is not None:
             for plugin in state.plugins.plugins:
                 if isinstance(plugin, RateLimitPlugin):
+                    plugin.set_shared(self._shared_backend, self.metrics)
+                elif hasattr(plugin, "set_shared"):
+                    # Other stateful plugins (e.g. auth budget ledger) share
+                    # the same backend the rate limiter uses.
                     plugin.set_shared(self._shared_backend, self.metrics)
         return state
 
@@ -131,6 +140,12 @@ class GatewayApp:
             model, _, deployment_key = name.partition(sep)
             self.state.router.impose_cooldown(model, deployment_key, remaining_s)
 
+    def _apply_tokenizer_config(self) -> None:
+        """(Re)build the estimator from the loaded config and inject it into plugins."""
+        self.tokenizer = build_tokenizer(self.state.config.section("server"))
+        for plugin in self.state.plugins.plugins:
+            plugin.estimator = self.tokenizer
+
     async def reload_if_changed(self) -> bool:
         """Hot-reload config; rebuilds router/plugins, providers only if changed."""
         fresh = self._watcher.poll() if self._watcher is not None else None
@@ -144,6 +159,8 @@ class GatewayApp:
                 self._shared_backend = self._build_shared_backend(fresh)
                 if old_backend is not None:
                     await old_backend.aclose()
+            if (old.config.section("server") or {}) != (fresh.section("server") or {}):
+                self.tokenizer = build_tokenizer(fresh.section("server"))
             new_state = self._materialize(fresh)
         except Exception:
             logger.exception("config reload materialization failed; keeping previous state")
@@ -306,12 +323,14 @@ class GatewayApp:
             if isinstance(usage, dict) and usage.get("total_tokens") is not None:
                 ctx.prompt_tokens = usage.get("prompt_tokens")
                 ctx.completion_tokens = usage.get("completion_tokens") or 0
+                ctx.cache_read_tokens, ctx.cache_write_tokens = cache_tokens_of(usage)
                 ctx.usage_reported = True
             else:
-                ctx.prompt_tokens = estimate_tokens(embedding_request_text(payload))
+                ctx.prompt_tokens = self.tokenizer.estimate(embedding_request_text(payload))
                 ctx.completion_tokens = 0
             ctx.response = body_out
             ctx.status_code = 200
+            self._record_cost(ctx)
 
             try:
                 await self.state.plugins.run_response(ctx)
@@ -336,6 +355,7 @@ class GatewayApp:
         self._record_usage_from_body(ctx, body)
         ctx.response = body
         ctx.status_code = 200
+        self._record_cost(ctx)  # before response hooks: plugins bill budgets from ctx.cost_usd
 
         try:
             await self.state.plugins.run_response(ctx)
@@ -373,12 +393,14 @@ class GatewayApp:
                     continue
                 text_parts.append(chunk_text(filtered))
                 yield _sse(filtered)
-            # Settle usage before end hooks so plugins (e.g. token-limit
-            # reconciliation) see the final numbers.
+            # Settle usage and cost before end hooks so plugins (token-limit
+            # reconciliation, budget billing) see the final numbers.
             if outcome.usage and not ctx.usage_reported:
                 ctx.prompt_tokens = outcome.usage.get("prompt_tokens")
                 ctx.completion_tokens = outcome.usage.get("completion_tokens")
+                ctx.cache_read_tokens, ctx.cache_write_tokens = cache_tokens_of(outcome.usage)
                 ctx.usage_reported = True
+            self._record_cost(ctx)
             await state.plugins.run_stream_end(ctx)
         except GatewayError as exc:
             error = exc
@@ -399,10 +421,11 @@ class GatewayApp:
             if outcome.usage and not ctx.usage_reported:
                 ctx.prompt_tokens = outcome.usage.get("prompt_tokens")
                 ctx.completion_tokens = outcome.usage.get("completion_tokens")
+                ctx.cache_read_tokens, ctx.cache_write_tokens = cache_tokens_of(outcome.usage)
                 ctx.usage_reported = True
             if not ctx.usage_reported:
-                ctx.prompt_tokens = ctx.prompt_tokens or estimate_tokens(request_text(ctx.payload))
-                ctx.completion_tokens = ctx.completion_tokens or estimate_tokens("".join(text_parts))
+                ctx.prompt_tokens = ctx.prompt_tokens or self.tokenizer.estimate(request_text(ctx.payload))
+                ctx.completion_tokens = ctx.completion_tokens or self.tokenizer.estimate("".join(text_parts))
             if error is not None:
                 self._finish_error(ctx, error, started)
             else:
@@ -419,10 +442,11 @@ class GatewayApp:
         if isinstance(usage, dict) and usage.get("total_tokens") is not None:
             ctx.prompt_tokens = usage.get("prompt_tokens")
             ctx.completion_tokens = usage.get("completion_tokens")
+            ctx.cache_read_tokens, ctx.cache_write_tokens = cache_tokens_of(usage)
             ctx.usage_reported = True
         else:
-            ctx.prompt_tokens = estimate_tokens(request_text(ctx.payload))
-            ctx.completion_tokens = estimate_tokens(response_text(body))
+            ctx.prompt_tokens = self.tokenizer.estimate(request_text(ctx.payload))
+            ctx.completion_tokens = self.tokenizer.estimate(response_text(body))
 
     def _pricing_for(self, model: str) -> dict[str, float] | None:
         pricing = self.state.config.section("pricing") or {}
@@ -430,20 +454,34 @@ class GatewayApp:
         return entry if isinstance(entry, dict) else None
 
     def _record_cost(self, ctx: PluginContext) -> None:
-        """Accumulate upstream spend; cache hits cost nothing. Silent no-op for
-        unpriced models."""
+        """Compute and record spend; sets ctx.cost_usd for budget accounting.
+
+        Tiered pricing: `cache_read_per_1k` / `cache_write_per_1k` price the
+        cached portions of the prompt; the remainder bills at `input_per_1k`.
+        Cache hits and unpriced models cost nothing (silent no-op)."""
         if ctx.cache_hit or not ctx.usage_reported:
+            ctx.cost_usd = 0.0
             return
         pricing = self._pricing_for(ctx.model)
         if not pricing:
+            ctx.cost_usd = 0.0
             return
+        cache_read = ctx.cache_read_tokens or 0
+        cache_write = ctx.cache_write_tokens or 0
+        uncached_input = max(0, (ctx.prompt_tokens or 0) - cache_read - cache_write)
+        input_rate = float(pricing.get("input_per_1k", 0))
         try:
             usd = (
-                (ctx.prompt_tokens or 0) / 1000 * float(pricing.get("input_per_1k", 0))
+                uncached_input / 1000 * input_rate
                 + (ctx.completion_tokens or 0) / 1000 * float(pricing.get("output_per_1k", 0))
+                # missing cache rates fall back to the input price (conservative)
+                + cache_read / 1000 * float(pricing.get("cache_read_per_1k", input_rate))
+                + cache_write / 1000 * float(pricing.get("cache_write_per_1k", input_rate))
             )
         except (TypeError, ValueError):
+            ctx.cost_usd = 0.0
             return
+        ctx.cost_usd = usd
         self.metrics.inc_cost(ctx.model, usd)
 
     def _metrics_finish(self, ctx: PluginContext) -> None:
@@ -453,11 +491,8 @@ class GatewayApp:
         if ctx.stream and ctx.first_token_latency_s:
             self.metrics.observe_first_token(ctx.model, provider, ctx.first_token_latency_s)
         if not ctx.usage_reported:
-            from aigateway.schemas import estimate_tokens as _est
-
-            ctx.prompt_tokens = ctx.prompt_tokens or _est(request_text(ctx.payload))
+            ctx.prompt_tokens = ctx.prompt_tokens or self.tokenizer.estimate(request_text(ctx.payload))
         self.metrics.inc_tokens(ctx.model, provider, ctx.prompt_tokens or 0, ctx.completion_tokens or 0)
-        self._record_cost(ctx)
         if ctx.cache_hit:
             self.metrics.inc_cache(ctx.model, True)
         else:

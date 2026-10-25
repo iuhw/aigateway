@@ -64,6 +64,18 @@ class StateBackend(ABC):
         """All active cooldowns under `prefix` as {name: remaining_seconds}."""
 
     @abstractmethod
+    async def incr_spend(self, key: str, usd: float, window_s: int) -> float:
+        """Add `usd` to a budget window counter; returns the new total.
+
+        The key embeds the window identity (e.g. UTC day/month); `window_s`
+        only sets the TTL so counters self-clean in shared backends.
+        """
+
+    @abstractmethod
+    async def get_spend(self, key: str) -> float:
+        """Current total of a budget window counter."""
+
+    @abstractmethod
     async def aclose(self) -> None:
         """Release connections."""
 
@@ -75,6 +87,7 @@ class InMemoryBackend(StateBackend):
         # name -> (tokens, rate_per_s, updated, capacity)
         self._buckets: dict[str, tuple[float, float, float, float]] = {}
         self._cooldowns: dict[str, float] = {}  # name -> expiry (monotonic)
+        self._spend: dict[str, float] = {}
 
     async def acquire_bucket(
         self, name: str, rate_per_minute: float, capacity: float, amount: float = 1.0
@@ -111,9 +124,17 @@ class InMemoryBackend(StateBackend):
         self._cooldowns = {k: v for k, v in self._cooldowns.items() if v > now}
         return {k: v for k, v in active.items() if k.startswith(prefix)}
 
+    async def incr_spend(self, key: str, usd: float, window_s: int) -> float:
+        self._spend[key] = self._spend.get(key, 0.0) + usd
+        return self._spend[key]
+
+    async def get_spend(self, key: str) -> float:
+        return self._spend.get(key, 0.0)
+
     async def aclose(self) -> None:
         self._buckets.clear()
         self._cooldowns.clear()
+        self._spend.clear()
 
 
 class RedisBackend(StateBackend):
@@ -141,6 +162,9 @@ class RedisBackend(StateBackend):
 
     def _cooldown_prefix(self) -> str:
         return f"{self.key_prefix}:cd:"
+
+    def _spend_key(self, key: str) -> str:
+        return f"{self.key_prefix}:spend:{key}"
 
     async def acquire_bucket(
         self, name: str, rate_per_minute: float, capacity: float, amount: float = 1.0
@@ -204,6 +228,26 @@ class RedisBackend(StateBackend):
             return result
         except Exception as exc:  # noqa: BLE001
             raise StateBackendError(f"redis fetch_cooldowns failed: {exc}") from exc
+
+    async def incr_spend(self, key: str, usd: float, window_s: int) -> float:
+        """INCRBYFLOAT + TTL on first touch of the window key. Redis floats are
+        IEEE doubles; USD accumulation at float precision is fine for budgets."""
+        try:
+            name = self._spend_key(key)
+            total = await self._redis.incrbyfloat(name, usd)
+            ttl = await self._redis.ttl(name)
+            if ttl is None or ttl < 0:
+                await self._redis.expire(name, window_s)
+            return float(total)
+        except Exception as exc:  # noqa: BLE001
+            raise StateBackendError(f"redis incr_spend failed: {exc}") from exc
+
+    async def get_spend(self, key: str) -> float:
+        try:
+            value = await self._redis.get(self._spend_key(key))
+            return float(value or 0.0)
+        except Exception as exc:  # noqa: BLE001
+            raise StateBackendError(f"redis get_spend failed: {exc}") from exc
 
     async def aclose(self) -> None:
         await self._redis.aclose()

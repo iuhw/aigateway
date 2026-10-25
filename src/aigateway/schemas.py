@@ -80,6 +80,22 @@ def embedding_request_text(payload: dict[str, Any]) -> str:
     return ""
 
 
+def cache_tokens_of(usage: dict[str, Any]) -> tuple[int, int]:
+    """(cache_read, cache_write) token counts from a usage dict.
+
+    Accepts the gateway-normalized fields (`cache_read_tokens` /
+    `cache_write_tokens`, emitted by the native adapters) and OpenAI's
+    `prompt_tokens_details.cached_tokens`. Both are subsets of prompt_tokens.
+    """
+    read = usage.get("cache_read_tokens")
+    if read is None:
+        details = usage.get("prompt_tokens_details")
+        if isinstance(details, dict):
+            read = details.get("cached_tokens")
+    write = usage.get("cache_write_tokens")
+    return int(read or 0), int(write or 0)
+
+
 def message_text(message: dict[str, Any]) -> str:
     """Best-effort plain-text extraction from a chat message for text scans."""
     content = message.get("content")
@@ -139,5 +155,13 @@ def set_chunk_text(chunk: dict[str, Any], text: str) -> None:
 
 
 def estimate_tokens(text: str) -> int:
-    """Cheap token estimate (~4 chars/token) used when the upstream reports no usage."""
-    return max(1, (len(text) + 3) // 4)
+    """Token estimate used when the upstream reports no usage.
+
+    Delegates to the Unicode-aware heuristic in `tokenizers` (CJK-calibrated;
+    the old flat ~4 chars/token model under-counted Chinese ~3.6x). Keeps the
+    historical >=1 floor so call sites never record zero usage. The app itself
+    uses its configurable estimator directly.
+    """
+    from aigateway.tokenizers import estimate_default
+
+    return max(1, estimate_default(text))

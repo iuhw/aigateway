@@ -169,6 +169,14 @@ def from_gemini_response(body: dict[str, Any], *, model: str) -> dict[str, Any]:
     if tool_calls:
         message["tool_calls"] = tool_calls
     usage = body.get("usageMetadata") or {}
+    openai_usage: dict[str, int] = {
+        # promptTokenCount already includes cached content (Gemini convention).
+        "prompt_tokens": usage.get("promptTokenCount", 0),
+        "completion_tokens": usage.get("candidatesTokenCount", 0),
+        "total_tokens": usage.get("totalTokenCount", 0),
+    }
+    if usage.get("cachedContentTokenCount"):
+        openai_usage["cache_read_tokens"] = usage["cachedContentTokenCount"]
     return {
         "id": f"chatcmpl-gemini-{body.get('responseId') or 'unknown'}",
         "object": "chat.completion",
@@ -181,11 +189,7 @@ def from_gemini_response(body: dict[str, Any], *, model: str) -> dict[str, Any]:
                 "finish_reason": GEMINI_FINISH_TO_OPENAI.get(candidate.get("finishReason"), "stop"),
             }
         ],
-        "usage": {
-            "prompt_tokens": usage.get("promptTokenCount", 0),
-            "completion_tokens": usage.get("candidatesTokenCount", 0),
-            "total_tokens": usage.get("totalTokenCount", 0),
-        },
+        "usage": openai_usage,
     }
 
 
@@ -295,17 +299,20 @@ class GeminiProvider(Provider):
                     if usage_meta:
                         # OpenAI include_usage style: usage lands in a final
                         # standalone chunk after the finish_reason chunk.
+                        usage_out: dict[str, int] = {
+                            "prompt_tokens": usage_meta.get("promptTokenCount", 0),
+                            "completion_tokens": usage_meta.get("candidatesTokenCount", 0),
+                            "total_tokens": usage_meta.get("totalTokenCount", 0),
+                        }
+                        if usage_meta.get("cachedContentTokenCount"):
+                            usage_out["cache_read_tokens"] = usage_meta["cachedContentTokenCount"]
                         yield {
                             "id": chunk_id,
                             "object": "chat.completion.chunk",
                             "created": created,
                             "model": model,
                             "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
-                            "usage": {
-                                "prompt_tokens": usage_meta.get("promptTokenCount", 0),
-                                "completion_tokens": usage_meta.get("candidatesTokenCount", 0),
-                                "total_tokens": usage_meta.get("totalTokenCount", 0),
-                            },
+                            "usage": usage_out,
                         }
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             raise UpstreamUnavailable(f"{self.name}: {type(exc).__name__}: {exc}") from exc

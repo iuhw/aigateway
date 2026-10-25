@@ -28,7 +28,7 @@ from typing import Any, ClassVar
 
 from aigateway.errors import RateLimitError
 from aigateway.plugins.base import Plugin, PluginContext, register_plugin
-from aigateway.schemas import estimate_tokens, request_text
+from aigateway.schemas import request_text
 from aigateway.state import InMemoryBackend, StateBackend, StateBackendError
 
 
@@ -109,7 +109,7 @@ class RateLimitPlugin(Plugin):
         return limits
 
     def _token_estimate(self, ctx: PluginContext) -> int:
-        est_input = estimate_tokens(request_text(ctx.payload))
+        est_input = self.estimator.estimate(request_text(ctx.payload))
         max_tokens = ctx.payload.get("max_tokens") or self.assumed_max_tokens
         return est_input + int(max_tokens)
 

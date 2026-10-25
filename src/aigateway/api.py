@@ -151,7 +151,11 @@ def create_app(config_path: str, *, config_watcher: bool = True) -> FastAPI:
 
         async def anthropic_stream() -> AsyncIterator[str]:
             async for event in stream_events(
-                result, model=str(openai_body["model"]), prompt_text=prompt, max_tokens=max_tokens
+                result,
+                model=str(openai_body["model"]),
+                prompt_text=prompt,
+                max_tokens=max_tokens,
+                estimator=gateway.tokenizer,
             ):
                 yield event
 

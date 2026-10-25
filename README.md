@@ -22,7 +22,11 @@ Envoy AI Gateway 的成熟设计自主实现（调研见 [docs/](docs/)）。
   单进程默认内存后端，语义等价（见 `state.py` 文档）
 - 流量治理：认证（虚拟 key + 模型白名单）、限流（**请求级 + token 级** RPM：预扣估算、
   按上游实际用量多退少补）、请求体/消息数/消息长度上限（413 拒绝）、`/metrics` `/admin/*` 独立管理密钥
-- **成本追踪**：`pricing` 配置每模型单价 → `gateway_cost_usd_total` 指标按模型累计美元花费
+- **成本控制**：`pricing` 每模型单价（支持 **分层 cache-read/cache-write 价**）→
+  `gateway_cost_usd_total` 按模型累计；虚拟 key 可设 **日/月美元预算硬限**（超限 429
+  `budget_exceeded`，账本支持 Redis 跨实例共享）
+- **token 计量**：Unicode 感知启发式估算（中英文混合语料对 o200k_base 校准，聚合误差 ~±20%；
+  旧版平摊 4 字符/token 对中文低估 ~3.6 倍）；可选 `tokenizer: tiktoken` 精确计数
 - 缓存：精确匹配响应缓存（TTL + 容量淘汰）
 - 可观测性：Prometheus 指标（请求/延迟/TTFT/token/插件拒绝/缓存命中/上游尝试/后端错误/成本）、
   结构化 JSON 请求日志（轮转）、`/healthz` `/readyz` `/metrics` `/admin/routes` `/admin/plugins`
@@ -34,7 +38,7 @@ Envoy AI Gateway 的成熟设计自主实现（调研见 [docs/](docs/)）。
 | 插件 | 说明 |
 |---|---|
 | `keyword-filter-plugin` | 关键词检测过滤：block / mask 双模式；请求与响应双向；**流式跨块安全**（安全前缀切分算法） |
-| `auth-plugin` | Bearer 虚拟 key（明文/SHA-256），模型白名单 |
+| `auth-plugin` | Bearer 虚拟 key（明文/SHA-256），模型白名单，**日/月美元预算硬限** |
 | `rate-limit-plugin` | token bucket 限流（模型级 / 身份级） |
 | `response-cache-plugin` | 精确匹配缓存 |
 | `request-log-plugin` | 每请求 JSON 日志（文件轮转 / stdout） |
@@ -81,7 +85,7 @@ client ──► FastAPI (api.py)
 ## 测试与基准
 
 ```bash
-.venv/Scripts/python -m pytest tests/ -q        # 194 个测试（含故障注入/混沌/多实例/安全/热重载/停机/tools/embeddings）
+.venv/Scripts/python -m pytest tests/ -q        # 226 个测试（含故障注入/混沌/多实例/安全/热重载/停机/tools/embeddings/预算/分层定价）
 .venv/Scripts/python -m ruff check src tests    # lint
 .venv/Scripts/python benchmarks/bench_gateway.py  # 基准 → docs/benchmark-report.md
 
@@ -126,7 +130,7 @@ aigateway serve --config gateway.prod.yaml --port 8080
 - SLO 与验证证据：[docs/operations.md](docs/operations.md) §2
 - 告警规则与 runbook（Redis 故障、上游劣化、配置回滚等 6 类场景）：[docs/operations.md](docs/operations.md) §3-4
 - 已知生产边界（token 级限流、TLS 终结点、流式过滤窗口等）：[docs/operations.md](docs/operations.md) §5
-- CI（GitHub Actions）：lint + 194 测试 + 基准 smoke + Docker 构建/健康检查
+- CI（GitHub Actions）：lint + 226 测试 + 基准 smoke + Docker 构建/健康检查
 
 ## 项目结构
 
@@ -138,6 +142,7 @@ src/aigateway/
   config.py         YAML 配置、构建器、热重载 watcher（纳秒 mtime 防抖）
   state.py          共享状态后端：InMemory | Redis（分布式限流+冷却同步）
   schemas.py        OpenAI 兼容请求 schema 与文本抽取工具
+  tokenizers.py     token 估算（Unicode 启发式 / 可选 tiktoken）
   errors.py         OpenAI 风格错误体系
   core/
     provider.py     Provider 抽象（chat / stream / embed / health）
@@ -153,7 +158,7 @@ src/aigateway/
     base.py         Plugin 接口、PluginChain、注册表、外部加载
     keyword_filter.py / auth.py / rate_limit.py / response_cache.py / request_log.py
   observability/metrics.py   Prometheus 指标（含成本）
-tests/              194 tests（单元/集成/wire 故障注入/混沌/多实例/安全/热重载/停机/Anthropic/tools/embeddings/原生适配器）
+tests/              226 tests（单元/集成/wire 故障注入/混沌/多实例/安全/热重载/停机/Anthropic/tools/embeddings/原生适配器/预算/定价）
 benchmarks/         基准测试（--quick 供 CI）
 scripts/            负载测试、soak 耐久、并行下载器、Ollama 安装、E2E 验证（13 项）
 deploy/             生产配置、Prometheus 抓取、Grafana 仪表盘与数据源

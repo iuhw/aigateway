@@ -51,7 +51,8 @@ async def test_token_limit_refuses_when_estimate_exceeds_window():
     """An estimate larger than the whole window budget can never fit: rejected
     immediately (the caller must raise max_tokens or shrink the prompt)."""
     plugin = RateLimitPlugin({"token_rpm": {"m1": 100}, "assumed_max_tokens": 10})
-    payload = {"messages": [{"role": "user", "content": "z" * 400}]}  # ~110 tok est > 100 cap
+    # "z" run of 600 -> ceil(599/5) = 120 estimated tokens + 10 assumed > 100 cap
+    payload = {"messages": [{"role": "user", "content": "z" * 600}]}
     with pytest.raises(RateLimitError):
         await plugin.on_request(make_ctx(payload))
     with pytest.raises(RateLimitError):

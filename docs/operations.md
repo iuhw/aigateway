@@ -84,8 +84,9 @@
 
 ## 5. 已知边界（生产使用须知）
 
-1. **token 级限流**基于估算预扣 + 完成后按上游实际用量多退少补；估算用 ~4 字符/token 启发式
-   （未带 `max_tokens` 时按 512 计）。窗口边界处固定窗口允许最多 2x 突发（与 Kong 相同取舍）。
+1. **token 级限流**基于估算预扣 + 完成后按上游实际用量多退少补；估算默认 Unicode 感知启发式
+   （对 o200k_base 校准，聚合误差 ~±20%；短高频词可能高估 ~2x）。可配 `server.tokenizer: tiktoken`
+   精确计数（离线安装自动回退启发式）。窗口边界处固定窗口允许最多 2x 突发（与 Kong 相同取舍）。
 2. **Anthropic 兼容面**：`/v1/messages` 支持 system/text blocks/stop_sequences/temperature/
    top_p/max_tokens、完整流式事件与 **tools**（定义、tool_choice、tool_use/tool_result 块、
    流式 tool 参数事件）；图片与 citations 明确拒绝（400）。
@@ -95,8 +96,9 @@
    SigV4 纯标准库实现）。适配器覆盖 chat + tools（含流式）；**embeddings 仅 openai 类型支持**——
    不支持的部署按传输故障语义处理，调度器自动切换到支持 embeddings 的部署。
 6. **缓存为单键精确匹配**（进程内——同副本重复请求才命中；跨副本响应缓存在路线图）。
-7. **成本追踪**按 `pricing` 配置的静态单价计算（无分层阶梯/折扣价）；`usage` 缺失时 token 用量为
-   ~4 字符/token 估算，估算口径下成本同样为近似值。
+7. **成本追踪**按 `pricing` 配置的单价计算，支持 cache-read/write 分层价（缺省回退 input 价）。
+   预算硬限是 check-then-bill 语义：预算耗尽瞬间在途请求可能小幅超出；`usage` 缺失时按估算
+   token 计价，估算口径下成本同样为近似值。账本随重启/热重载重建（Redis 后端除外）。
 8. Windows 上热重载受目录元数据缓存影响可能延迟数秒生效（Linux 即时）。
 
 ## 6. 升级与回滚

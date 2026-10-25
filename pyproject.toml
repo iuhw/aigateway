@@ -24,6 +24,9 @@ dev = [
 redis = [
     "redis>=5.0",
 ]
+tokenizer = [
+    "tiktoken>=0.7",
+]
 
 [project.scripts]
 aigateway = "aigateway.__main__:main"

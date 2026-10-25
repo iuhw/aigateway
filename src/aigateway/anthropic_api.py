@@ -21,7 +21,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from aigateway.errors import BadRequestError
-from aigateway.schemas import estimate_tokens
+from aigateway.tokenizers import TokenEstimator, estimate_default
 
 _STOP_REASON_MAP = {
     "stop": "end_turn",
@@ -293,6 +293,7 @@ async def stream_events(
     model: str,
     prompt_text: str,
     max_tokens: int,
+    estimator: TokenEstimator | None = None,
 ) -> AsyncIterator[str]:
     """Translate the gateway's OpenAI SSE stream into Anthropic events.
 
@@ -307,7 +308,7 @@ async def stream_events(
     message_delta, mirroring how providers that stream usage behave.
     """
     message_id = f"msg_{model.replace(':', '')}"
-    input_tokens = estimate_tokens(prompt_text)
+    input_tokens = (estimator.estimate if estimator else estimate_default)(prompt_text)
     yield _sse_event(
         "message_start",
         {

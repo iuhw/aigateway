@@ -171,12 +171,39 @@ def from_converse_response(body: dict[str, Any], *, model: str) -> dict[str, Any
                 "finish_reason": BEDROCK_STOP_REASON_TO_OPENAI.get(body.get("stopReason"), "stop"),
             }
         ],
-        "usage": {
-            "prompt_tokens": usage.get("inputTokens", 0),
-            "completion_tokens": usage.get("outputTokens", 0),
-            "total_tokens": usage.get("totalTokens", 0),
-        },
+        "usage": _openai_usage(
+            input_tokens=usage.get("inputTokens"),
+            cache_read=usage.get("cacheReadInputTokens"),
+            cache_write=usage.get("cacheWriteInputTokens"),
+            completion_tokens=usage.get("outputTokens"),
+        ),
     }
+
+
+def _openai_usage(
+    *,
+    input_tokens: int | None,
+    cache_read: int | None,
+    cache_write: int | None,
+    completion_tokens: int | None,
+) -> dict[str, int]:
+    """OpenAI-style usage; prompt_tokens covers the whole prompt (Bedrock
+    reports uncached input separately from cache reads/writes), cached
+    portions broken out for tiered pricing."""
+    input_tokens = int(input_tokens or 0)
+    cache_read = int(cache_read or 0)
+    cache_write = int(cache_write or 0)
+    completion = int(completion_tokens or 0)
+    prompt = input_tokens + cache_read + cache_write
+    usage: dict[str, int] = {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": prompt + completion,
+    }
+    if cache_read or cache_write:
+        usage["cache_read_tokens"] = cache_read
+        usage["cache_write_tokens"] = cache_write
+    return usage
 
 
 class BedrockProvider(Provider):
@@ -263,6 +290,8 @@ class BedrockProvider(Provider):
         next_call_index = 0
         finish_reason: str | None = None
         input_tokens: int | None = None
+        cache_read: int | None = None
+        cache_write: int | None = None
         output_tokens: int | None = None
         try:
             async with self._client.stream(
@@ -339,15 +368,18 @@ class BedrockProvider(Provider):
                     elif isinstance(event.get("metadata"), dict):
                         usage_meta = event["metadata"].get("usage") or {}
                         input_tokens = usage_meta.get("inputTokens", input_tokens)
+                        cache_read = usage_meta.get("cacheReadInputTokens", cache_read)
+                        cache_write = usage_meta.get("cacheWriteInputTokens", cache_write)
                         output_tokens = usage_meta.get("outputTokens", output_tokens)
 
                 usage = None
                 if input_tokens is not None or output_tokens is not None:
-                    usage = {
-                        "prompt_tokens": input_tokens or 0,
-                        "completion_tokens": output_tokens or 0,
-                        "total_tokens": (input_tokens or 0) + (output_tokens or 0),
-                    }
+                    usage = _openai_usage(
+                        input_tokens=input_tokens,
+                        cache_read=cache_read,
+                        cache_write=cache_write,
+                        completion_tokens=output_tokens,
+                    )
                 final = _chunk(chunk_id, model, created, {}, finish_reason or "stop")
                 if usage:
                     final["usage"] = usage

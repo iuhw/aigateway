@@ -64,6 +64,12 @@ class PluginContext:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     usage_reported: bool = False
+    #: Prompt-cache breakdown (subsets of prompt_tokens) for tiered pricing.
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    #: USD cost of this request (computed after usage settlement, before
+    #: response/stream-end hooks; consumed by budget accounting).
+    cost_usd: float | None = None
     cache_hit: bool = False
     error: GatewayError | None = None
     #: Plugin-private scratch space, keyed by plugin name.
@@ -84,6 +90,11 @@ class Plugin(ABC):  # noqa: B024 - hook methods all have no-op defaults
     def __init__(self, config: dict[str, Any] | None = None):
         self.config: dict[str, Any] = config or {}
         self.enabled = True
+        #: Token estimator for plugins that need token counts (rate limiting).
+        #: Injected by the app; defaults to the module-level heuristic.
+        from aigateway.tokenizers import DEFAULT_ESTIMATOR
+
+        self.estimator = DEFAULT_ESTIMATOR
 
     def display_name(self) -> str:
         # `_instance_name` is set by config loading to the plugin's config key,

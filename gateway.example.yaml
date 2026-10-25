@@ -4,6 +4,11 @@
 server:
   host: 0.0.0.0
   port: 8080
+  # Token estimation for limits/metrics when upstream usage is missing:
+  # "unicode" (default, CJK-aware heuristic) or "tiktoken" (exact, needs
+  # `pip install aigateway[tokenizer]`; falls back gracefully offline).
+  # tokenizer: tiktoken
+  # tokenizer_model: gpt-4o-mini
   # --- production hardening (uncomment for real deployments) ---
   # admin_api_key: "change-me"      # protects /metrics and /admin/*
   # max_body_bytes: 1048576         # 413 beyond this
@@ -12,9 +17,20 @@ server:
 
 # ---- cost tracking -------------------------------------------------------
 # Static per-model USD pricing; accumulates gateway_cost_usd_total by model.
+# Tiered rates (optional): prompt-cache reads/writes billed at their own
+# price, the uncached remainder at input_per_1k; missing cache rates fall
+# back to input_per_1k (conservative).
 # pricing:
 #   glm4:9b: { input_per_1k: 0.0, output_per_1k: 0.0 }
-#   gpt-4o-mini: { input_per_1k: 0.00015, output_per_1k: 0.0006 }
+#   gpt-4o-mini:
+#     input_per_1k: 0.00015
+#     output_per_1k: 0.0006
+#     cache_read_per_1k: 0.000075    # OpenAI cached-input price
+#   claude-sonnet-4:
+#     input_per_1k: 0.003
+#     output_per_1k: 0.015
+#     cache_read_per_1k: 0.0003
+#     cache_write_per_1k: 0.00375
 
 # ---- shared state across instances --------------------------------------
 # memory (default): limits are per-process. For N replicas/workers use redis:
@@ -91,6 +107,8 @@ plugins:
           name: demo
           models: null               # null = all models
           rpm: 120
+          # budgets: {daily_usd: 5, monthly_usd: 50}   # hard spend caps
+          #                                            # (429 budget_exceeded)
   keyword-filter-plugin:
     config:
       words: ["敏感词", "weapon", "forbidden"]

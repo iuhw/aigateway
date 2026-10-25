@@ -79,4 +79,5 @@ def test_set_response_text_and_chunks():
 
 def test_estimate_tokens_floor():
     assert estimate_tokens("") >= 1
-    assert estimate_tokens("abcd" * 10) == 10
+    # 40-letter run -> one word: max(1, ceil(39/5)) = 8 tokens (unicode heuristic)
+    assert estimate_tokens("abcd" * 10) == 8
