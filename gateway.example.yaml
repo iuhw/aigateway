@@ -14,6 +14,8 @@ server:
   # max_body_bytes: 1048576         # 413 beyond this
   # max_messages: 128
   # max_message_chars: 200000
+  # max_tracked_keys: 100           # cap distinct key labels in
+  #                                 # gateway_key_cost_usd_total (overflow -> "other")
 
 # ---- cost tracking -------------------------------------------------------
 # Static per-model USD pricing; accumulates gateway_cost_usd_total by model.
@@ -109,6 +111,14 @@ plugins:
           rpm: 120
           # budgets: {daily_usd: 5, monthly_usd: 50}   # hard spend caps
           #                                            # (429 budget_exceeded)
+          # token_quota: {daily: 1000000, monthly: 20000000}
+          #                                            # token caps per UTC window
+          #                                            # (429 token_quota_exceeded)
+          # expires_at: "2026-12-31T23:59:59+00:00"    # ISO-8601; expired -> 403
+          # concurrency: 8        # max in-flight requests per key (per replica)
+          # metadata: {team: ops} # free-form, echoed in /admin/keys
+          # budget_fail_open: true     # ledger read failures allow requests (default)
+          # dynamic_key_cache_s: 3     # /admin/keys dynamic-overlay cache TTL
   keyword-filter-plugin:
     config:
       words: ["敏感词", "weapon", "forbidden"]

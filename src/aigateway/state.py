@@ -22,6 +22,7 @@ protocol.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from abc import ABC, abstractmethod
@@ -75,6 +76,22 @@ class StateBackend(ABC):
     async def get_spend(self, key: str) -> float:
         """Current total of a budget window counter."""
 
+    async def get_dynamic_keys(self) -> dict[str, dict[str, Any]]:
+        """All admin-created (dynamic) virtual keys as {name: record}.
+
+        Only backends that can persist records implement this; the default
+        raises so callers can degrade to config-defined keys only.
+        """
+        raise StateBackendError("dynamic keys not supported by this backend")
+
+    async def set_dynamic_key(self, name: str, record: dict[str, Any]) -> None:
+        """Create or replace a dynamic virtual key record."""
+        raise StateBackendError("dynamic keys not supported by this backend")
+
+    async def delete_dynamic_key(self, name: str) -> None:
+        """Remove a dynamic virtual key record."""
+        raise StateBackendError("dynamic keys not supported by this backend")
+
     @abstractmethod
     async def aclose(self) -> None:
         """Release connections."""
@@ -88,6 +105,7 @@ class InMemoryBackend(StateBackend):
         self._buckets: dict[str, tuple[float, float, float, float]] = {}
         self._cooldowns: dict[str, float] = {}  # name -> expiry (monotonic)
         self._spend: dict[str, float] = {}
+        self._dynamic_keys: dict[str, dict[str, Any]] = {}
 
     async def acquire_bucket(
         self, name: str, rate_per_minute: float, capacity: float, amount: float = 1.0
@@ -131,10 +149,20 @@ class InMemoryBackend(StateBackend):
     async def get_spend(self, key: str) -> float:
         return self._spend.get(key, 0.0)
 
+    async def get_dynamic_keys(self) -> dict[str, dict[str, Any]]:
+        return dict(self._dynamic_keys)
+
+    async def set_dynamic_key(self, name: str, record: dict[str, Any]) -> None:
+        self._dynamic_keys[name] = dict(record)
+
+    async def delete_dynamic_key(self, name: str) -> None:
+        self._dynamic_keys.pop(name, None)
+
     async def aclose(self) -> None:
         self._buckets.clear()
         self._cooldowns.clear()
         self._spend.clear()
+        self._dynamic_keys.clear()
 
 
 class RedisBackend(StateBackend):
@@ -248,6 +276,28 @@ class RedisBackend(StateBackend):
             return float(value or 0.0)
         except Exception as exc:  # noqa: BLE001
             raise StateBackendError(f"redis get_spend failed: {exc}") from exc
+
+    def _dynkeys_name(self) -> str:
+        return f"{self.key_prefix}:dynkeys"
+
+    async def get_dynamic_keys(self) -> dict[str, dict[str, Any]]:
+        try:
+            raw = await self._redis.hgetall(self._dynkeys_name())
+            return {name: json.loads(record) for name, record in raw.items()}
+        except Exception as exc:  # noqa: BLE001
+            raise StateBackendError(f"redis get_dynamic_keys failed: {exc}") from exc
+
+    async def set_dynamic_key(self, name: str, record: dict[str, Any]) -> None:
+        try:
+            await self._redis.hset(self._dynkeys_name(), name, json.dumps(record))
+        except Exception as exc:  # noqa: BLE001
+            raise StateBackendError(f"redis set_dynamic_key failed: {exc}") from exc
+
+    async def delete_dynamic_key(self, name: str) -> None:
+        try:
+            await self._redis.hdel(self._dynkeys_name(), name)
+        except Exception as exc:  # noqa: BLE001
+            raise StateBackendError(f"redis delete_dynamic_key failed: {exc}") from exc
 
     async def aclose(self) -> None:
         await self._redis.aclose()

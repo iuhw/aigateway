@@ -100,6 +100,13 @@
    预算硬限是 check-then-bill 语义：预算耗尽瞬间在途请求可能小幅超出；`usage` 缺失时按估算
    token 计价，估算口径下成本同样为近似值。账本随重启/热重载重建（Redis 后端除外）。
 8. Windows 上热重载受目录元数据缓存影响可能延迟数秒生效（Linux 即时）。
+9. **key 生命周期**：`concurrency` 为**单副本**语义（N 副本有效上限 ×N）；动态 key
+   （`POST /admin/keys`）存于共享状态后端——memory 后端不跨重启，Redis 后端全副本共享且持久；
+   动态覆盖缓存默认 3s（`dynamic_key_cache_s`），删除后最长一个缓存周期内仍可能认证成功。
+10. **token 周期配额**与美元预算同为 check-then-bill：窗口耗尽瞬间在途请求可能小幅超出；
+    缓存命中不计费（与预算口径一致），但配额耗尽后的请求一律 429（含本应命中缓存的请求）。
+11. **per-key 成本指标** `gateway_key_cost_usd_total` 的 `key` 标签基数有上限
+    （`server.max_tracked_keys`，默认 100），超限聚合为 `other`。
 
 ## 6. 升级与回滚
 

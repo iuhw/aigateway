@@ -64,6 +64,17 @@ class Metrics:
             ("model",),
             registry=r,
         )
+        #: Cap on distinct `key` label values; keys beyond it aggregate into
+        #: "other" so unbounded virtual-key churn cannot explode the series
+        #: cardinality (tunable via server.max_tracked_keys).
+        self.key_label_limit = 100
+        self._key_labels: set[str] = set()
+        self.key_cost_usd_total = Counter(
+            "gateway_key_cost_usd_total",
+            "Accumulated upstream spend in USD per virtual key",
+            ("key",),
+            registry=r,
+        )
         self.cache_requests_total = Counter(
             "gateway_cache_requests_total",
             "Cache lookups",
@@ -104,6 +115,16 @@ class Metrics:
     def inc_cost(self, model: str, usd: float) -> None:
         if usd > 0:
             self.cost_usd_total.labels(model=model).inc(usd)
+
+    def inc_key_cost(self, key: str, usd: float) -> None:
+        """Per-virtual-key spend with a bounded label set (overflow -> "other")."""
+        if usd <= 0 or not key:
+            return
+        if key in self._key_labels or len(self._key_labels) < self.key_label_limit:
+            self._key_labels.add(key)
+        else:
+            key = "other"
+        self.key_cost_usd_total.labels(key=key).inc(usd)
 
     def inc_cache(self, model: str, hit: bool) -> None:
         self.cache_requests_total.labels(model=model, result="hit" if hit else "miss").inc()

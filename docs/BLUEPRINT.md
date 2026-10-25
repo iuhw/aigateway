@@ -52,24 +52,29 @@ v0.1 现状 ──► M1 治理 ──► M2 缓存 ──► M3 安全 ──�
 后续能力的计量地基（缓存命中率、报表、灰度都按身份归集）；安全（M3）在治理之后，
 因为护栏插件依赖 M1 的身份标签做审计归属。
 
-### M1（v0.2）租户与预算完善 —— 从预算硬限到可经营
+### M1（v0.2）租户与预算完善 —— 从预算硬限到可经营 ✅（2026-10-25 已交付）
 
 - **已就位**（v0.1.x，本蓝图制定时刚落地）：虚拟 key 日/月美元预算硬限（429 `budget_exceeded`）、
   Redis 共享账本、分层 cache-read/write 定价、Unicode 感知 token 估算器。
-- **本里程碑补齐**：
-  - token 周期配额（日/月 token 上限，与美元预算并行生效）；
-  - key 生命周期：`expires_at` 过期、`concurrency` 并发上限、`metadata`（team/app 归属）；
-  - 成本归集：`gateway_cost_usd_total` 增加 `key` 标签（控制基数：超上限聚合为 `other`）；
-  - **Admin API v1**（`api.py`，管理密钥保护）：`/admin/keys` CRUD、`/admin/usage?key=…`
-    用量与余额查询；配额状态走 Redis 共享后端（`state.py`），多副本一致。
-- **涉及模块**：`plugins/auth.py`、`plugins/rate_limit.py`、`state.py`、`observability/metrics.py`、`api.py`。
-- **验收**：多副本 Redis 下预算/配额一致性测试；超限拒绝与指标基数上限测试；基准回归达标。
+- **本次交付**：
+  - token 周期配额（日/月 token 上限，与美元预算并行生效；429 `token_quota_exceeded`，缓存命中不计费）；
+  - key 生命周期：`expires_at` 过期（403 `key_expired`）、`concurrency` 并发上限（单副本语义）、
+    `metadata`（team/app 归属）；
+  - 成本归集：新增 `gateway_key_cost_usd_total{key}` 指标（基数上限 `max_tracked_keys`，超限聚合
+    `other`；未改动原 `gateway_cost_usd_total`，既有面板零影响）；
+  - **Admin API v1**：`GET/POST/DELETE /admin/keys`（列表脱敏 + 动态 key CRUD，共享后端覆盖层）、
+    `GET /admin/usage`（按 key 预算余额与配额用量）。
+- **验收达成**：25 项新测试（生命周期/配额/并发/指标/Admin API/fakeredis 跨实例）。
 
 ### M2（v0.3）语义缓存 —— 复用 embeddings 管道
 
 - **`semantic-cache-plugin`**：请求文本 → `provider.embed`（复用 M0 已有的 `/v1/embeddings`
   上游管道）→ 相似度检索（内存/Redis 两后端，与 `state.py` 语义对齐）；cosine 阈值可配，
   默认关闭、开启需显式配置。
+- **跨副本精确缓存**：响应缓存提升为共享后端可选项（当前为进程内，见 operations.md 已知边界），
+  与语义缓存共用 Redis 基础设施。
+- **原生适配器 embeddings**：anthropic/gemini/bedrock 适配器补 embed 能力（当前仅 openai 类型支持，
+  见 operations.md 已知边界），消除语义缓存对上游类型的限制。
 - **正确性防线**：缓存键分区 = 模型 + messages 归一化指纹 + tools/参数指纹（参数不同绝不命中）；
   TTL 独立于精确缓存；命中打标进指标（`semantic_hit`），可一键降级回精确缓存。
 - **涉及模块**：新插件 `plugins/semantic_cache.py`、`state.py`（向量检索后端）、metrics。

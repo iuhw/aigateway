@@ -20,16 +20,21 @@ Envoy AI Gateway 的成熟设计自主实现（调研见 [docs/](docs/)）。
   连续失败冷却熔断（cooldown，借鉴 LiteLLM）、流式首块前可无感切换
 - **多实例共享状态**：Redis 后端的分布式限流（原子固定窗口，fail-open 可配）与跨副本冷却同步；
   单进程默认内存后端，语义等价（见 `state.py` 文档）
-- 流量治理：认证（虚拟 key + 模型白名单）、限流（**请求级 + token 级** RPM：预扣估算、
-  按上游实际用量多退少补）、请求体/消息数/消息长度上限（413 拒绝）、`/metrics` `/admin/*` 独立管理密钥
+- 流量治理：认证（虚拟 key + 模型白名单 + **key 生命周期**：`expires_at` 过期 403
+  `key_expired`、`concurrency` 并发上限、`metadata` 归属）、限流（**请求级 + token 级** RPM：
+  预扣估算、按上游实际用量多退少补）、**token 周期配额**（key 级日/月 token 上限，
+  429 `token_quota_exceeded`，缓存命中不计费）、请求体/消息数/消息长度上限（413 拒绝）、
+  `/metrics` `/admin/*` 独立管理密钥
 - **成本控制**：`pricing` 每模型单价（支持 **分层 cache-read/cache-write 价**）→
-  `gateway_cost_usd_total` 按模型累计；虚拟 key 可设 **日/月美元预算硬限**（超限 429
+  `gateway_cost_usd_total` 按模型累计、**`gateway_key_cost_usd_total` 按虚拟 key 归集**
+  （`max_tracked_keys` 基数上限，超限聚合 `other`）；虚拟 key 可设 **日/月美元预算硬限**（超限 429
   `budget_exceeded`，账本支持 Redis 跨实例共享）
 - **token 计量**：Unicode 感知启发式估算（中英文混合语料对 o200k_base 校准，聚合误差 ~±20%；
   旧版平摊 4 字符/token 对中文低估 ~3.6 倍）；可选 `tokenizer: tiktoken` 精确计数
 - 缓存：精确匹配响应缓存（TTL + 容量淘汰）
-- 可观测性：Prometheus 指标（请求/延迟/TTFT/token/插件拒绝/缓存命中/上游尝试/后端错误/成本）、
+- 可观测性：Prometheus 指标（请求/延迟/TTFT/token/插件拒绝/缓存命中/上游尝试/后端错误/成本/按 key 成本）、
   结构化 JSON 请求日志（轮转）、`/healthz` `/readyz` `/metrics` `/admin/routes` `/admin/plugins`
+  `/admin/keys`（虚拟 key 列表与动态 key CRUD）`/admin/usage`（按 key 用量/余额）
 - 运维：YAML 配置 + **热重载**（改坏自动保留旧状态）、`aigateway check` 配置校验 CLI、
   Dockerfile + docker-compose（含 Redis/Ollama/Prometheus/Grafana 全家桶）
 
@@ -38,7 +43,7 @@ Envoy AI Gateway 的成熟设计自主实现（调研见 [docs/](docs/)）。
 | 插件 | 说明 |
 |---|---|
 | `keyword-filter-plugin` | 关键词检测过滤：block / mask 双模式；请求与响应双向；**流式跨块安全**（安全前缀切分算法） |
-| `auth-plugin` | Bearer 虚拟 key（明文/SHA-256），模型白名单，**日/月美元预算硬限** |
+| `auth-plugin` | Bearer 虚拟 key（明文/SHA-256），模型白名单，日/月美元预算硬限，**token 周期配额**，**key 生命周期**（`expires_at`/`concurrency`/`metadata`），**动态 key**（`/admin/keys` CRUD，共享后端覆盖层） |
 | `rate-limit-plugin` | token bucket 限流（模型级 / 身份级） |
 | `response-cache-plugin` | 精确匹配缓存 |
 | `request-log-plugin` | 每请求 JSON 日志（文件轮转 / stdout） |
@@ -86,7 +91,7 @@ client ──► FastAPI (api.py)
 ## 测试与基准
 
 ```bash
-.venv/Scripts/python -m pytest tests/ -q        # 226 个测试（含故障注入/混沌/多实例/安全/热重载/停机/tools/embeddings/预算/分层定价）
+.venv/Scripts/python -m pytest tests/ -q        # 251 个测试（含故障注入/混沌/多实例/安全/热重载/停机/tools/embeddings/预算/分层定价/租户治理/Admin API）
 .venv/Scripts/python -m ruff check src tests    # lint
 .venv/Scripts/python benchmarks/bench_gateway.py  # 基准 → docs/benchmark-report.md
 
@@ -131,7 +136,7 @@ aigateway serve --config gateway.prod.yaml --port 8080
 - SLO 与验证证据：[docs/operations.md](docs/operations.md) §2
 - 告警规则与 runbook（Redis 故障、上游劣化、配置回滚等 6 类场景）：[docs/operations.md](docs/operations.md) §3-4
 - 已知生产边界（token 级限流、TLS 终结点、流式过滤窗口等）：[docs/operations.md](docs/operations.md) §5
-- CI（GitHub Actions）：lint + 226 测试 + 基准 smoke + Docker 构建/健康检查
+- CI（GitHub Actions）：lint + 251 测试 + 基准 smoke + Docker 构建/健康检查
 
 ## 项目结构
 
@@ -159,7 +164,7 @@ src/aigateway/
     base.py         Plugin 接口、PluginChain、注册表、外部加载
     keyword_filter.py / auth.py / rate_limit.py / response_cache.py / request_log.py
   observability/metrics.py   Prometheus 指标（含成本）
-tests/              226 tests（单元/集成/wire 故障注入/混沌/多实例/安全/热重载/停机/Anthropic/tools/embeddings/原生适配器/预算/定价）
+tests/              251 tests（单元/集成/wire 故障注入/混沌/多实例/安全/热重载/停机/Anthropic/tools/embeddings/原生适配器/预算/定价/租户治理/Admin API）
 benchmarks/         基准测试（--quick 供 CI）
 scripts/            负载测试、soak 耐久、并行下载器、Ollama 安装、E2E 验证（13 项）
 deploy/             生产配置、Prometheus 抓取、Grafana 仪表盘与数据源

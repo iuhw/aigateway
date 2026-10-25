@@ -15,7 +15,13 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import ValidationError
 
 from aigateway.app import GatewayApp
-from aigateway.errors import AuthenticationError, BadRequestError, GatewayError, PayloadTooLargeError
+from aigateway.errors import (
+    AuthenticationError,
+    BadRequestError,
+    GatewayError,
+    NotFoundError,
+    PayloadTooLargeError,
+)
 from aigateway.schemas import ChatCompletionRequest
 
 #: Hard ceiling on how much of a request body is read, regardless of config.
@@ -219,5 +225,72 @@ def create_app(config_path: str, *, config_watcher: bool = True) -> FastAPI:
     async def admin_plugins(request: Request) -> dict[str, Any]:
         _require_admin(request)
         return {"plugins": gateway.plugin_info()}
+
+    def _auth_plugin():
+        from aigateway.plugins.auth import AuthPlugin
+
+        for plugin in gateway.state.plugins.plugins:
+            if isinstance(plugin, AuthPlugin):
+                return plugin
+        return None
+
+    @app.get("/admin/keys")
+    async def admin_list_keys(request: Request) -> dict[str, Any]:
+        """All virtual keys (static config + dynamic overlay); key material is
+        never returned, only a masked hash prefix."""
+        _require_admin(request)
+        plugin = _auth_plugin()
+        if plugin is None:
+            raise NotFoundError("auth plugin is not configured")
+        return {"keys": await plugin.list_keys()}
+
+    @app.post("/admin/keys", status_code=201)
+    async def admin_create_key(request: Request) -> JSONResponse:
+        """Create a dynamic virtual key (stored in the shared-state backend).
+
+        The raw ``api_key`` is returned exactly once. Requires the shared_state
+        backend to support dynamic keys (memory keeps them per-process, Redis
+        shares and persists them)."""
+        _require_admin(request)
+        plugin = _auth_plugin()
+        if plugin is None:
+            raise NotFoundError("auth plugin is not configured")
+        raw = await _read_body(request)
+        try:
+            spec: Any = json.loads(raw)
+        except Exception as exc:
+            raise BadRequestError(f"request body must be valid JSON: {exc}") from exc
+        if not isinstance(spec, dict):
+            raise BadRequestError("request body must be a JSON object")
+        if not spec.get("name"):
+            raise BadRequestError("dynamic keys require a 'name'")
+        record, raw_key = await plugin.create_dynamic_key(spec)
+        return JSONResponse(
+            status_code=201,
+            content={
+                "key": record,
+                "api_key": raw_key,
+                "note": "store this api_key now; only its hash is kept",
+            },
+        )
+
+    @app.delete("/admin/keys/{name}")
+    async def admin_delete_key(name: str, request: Request) -> dict[str, Any]:
+        """Delete a dynamic virtual key (config-defined keys return 409)."""
+        _require_admin(request)
+        plugin = _auth_plugin()
+        if plugin is None:
+            raise NotFoundError("auth plugin is not configured")
+        await plugin.delete_dynamic_key(name)
+        return {"deleted": name}
+
+    @app.get("/admin/usage")
+    async def admin_usage(request: Request, key: str | None = None) -> dict[str, Any]:
+        """Per-key current-window budget spend and token-quota usage."""
+        _require_admin(request)
+        plugin = _auth_plugin()
+        if plugin is None:
+            raise NotFoundError("auth plugin is not configured")
+        return await plugin.usage_snapshot(name_filter=key)
 
     return app

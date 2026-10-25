@@ -14,7 +14,7 @@ from aigateway.config import ConfigWatcher, GatewayConfig
 from aigateway.core.dispatcher import Dispatcher
 from aigateway.core.provider import Provider
 from aigateway.core.router import Router
-from aigateway.errors import GatewayError, NotFoundError, UpstreamError
+from aigateway.errors import GatewayError, NotFoundError, RateLimitError, UpstreamError
 from aigateway.observability.metrics import Metrics
 from aigateway.plugins.base import PluginChain, PluginContext
 from aigateway.schemas import (
@@ -51,10 +51,21 @@ class GatewayApp:
         self._watch_task: asyncio.Task | None = None
         self._sync_task: asyncio.Task | None = None
         self._shared_backend: Any = None
+        #: In-flight request counters per virtual key (per-process; behind N
+        #: replicas the configured per-key concurrency limit applies per replica).
+        self._key_conc: dict[str, int] = {}
         self._watcher = ConfigWatcher(self.config_path)
         self.tokenizer: TokenEstimator = build_tokenizer(None)  # replaced below once config loads
         self.state = self._build_state()
-        self._apply_tokenizer_config()
+        self._apply_server_runtime_config()
+
+    def _apply_server_runtime_config(self) -> None:
+        """Runtime knobs derived from the `server` section (tokenizer + metrics)."""
+        self.tokenizer = build_tokenizer(self.state.config.section("server"))
+        for plugin in self.state.plugins.plugins:
+            plugin.estimator = self.tokenizer
+        limits = self.state.config.section("server") or {}
+        self.metrics.key_label_limit = int(limits.get("max_tracked_keys", 100))
 
     # -- lifecycle ---------------------------------------------------------------
 
@@ -140,11 +151,34 @@ class GatewayApp:
             model, _, deployment_key = name.partition(sep)
             self.state.router.impose_cooldown(model, deployment_key, remaining_s)
 
-    def _apply_tokenizer_config(self) -> None:
-        """(Re)build the estimator from the loaded config and inject it into plugins."""
-        self.tokenizer = build_tokenizer(self.state.config.section("server"))
-        for plugin in self.state.plugins.plugins:
-            plugin.estimator = self.tokenizer
+    # -- per-key concurrency ------------------------------------------------------
+
+    def _acquire_concurrency(self, ctx: PluginContext) -> None:
+        """Enforce the key's `concurrency` cap on in-flight requests.
+
+        Process-local by design (per-replica semantics). The release flag on
+        ctx.state makes acquire/release idempotent pairs even across error and
+        client-disconnect paths.
+        """
+        identity = ctx.identity if isinstance(ctx.identity, dict) else {}
+        limit = identity.get("concurrency")
+        if not limit:
+            return
+        name = str(identity.get("name") or "anonymous")
+        if self._key_conc.get(name, 0) >= int(limit):
+            raise RateLimitError(
+                f"key {name!r} concurrency limit of {limit} in-flight requests exceeded",
+                code="concurrency_exceeded",
+            )
+        self._key_conc[name] = self._key_conc.get(name, 0) + 1
+        ctx.state["_conc_held"] = name
+
+    def _release_concurrency(self, ctx: PluginContext) -> None:
+        name = ctx.state.get("_conc_held")
+        if name is None:
+            return
+        ctx.state["_conc_held"] = None
+        self._key_conc[name] = max(0, self._key_conc.get(name, 0) - 1)
 
     async def reload_if_changed(self) -> bool:
         """Hot-reload config; rebuilds router/plugins, providers only if changed."""
@@ -160,7 +194,7 @@ class GatewayApp:
                 if old_backend is not None:
                     await old_backend.aclose()
             if (old.config.section("server") or {}) != (fresh.section("server") or {}):
-                self.tokenizer = build_tokenizer(fresh.section("server"))
+                self._apply_server_runtime_config()
             new_state = self._materialize(fresh)
         except Exception:
             logger.exception("config reload materialization failed; keeping previous state")
@@ -262,6 +296,7 @@ class GatewayApp:
                 raise NotFoundError(f"model {request.model!r} is not configured")
 
             await self.state.plugins.run_request(ctx)
+            self._acquire_concurrency(ctx)
 
             # Response cache hit: serve without dispatching (non-streaming only).
             if ctx.cache_hit and ctx.response is not None:
@@ -270,11 +305,15 @@ class GatewayApp:
                 self._record_usage_from_body(ctx, ctx.response)
                 self._metrics_finish(ctx)
                 await self.state.plugins.run_response(ctx)
+                self._release_concurrency(ctx)
                 return ctx.response  # type: ignore[return-value]
 
             if request.stream:
                 return self._chat_streaming(ctx, route, started)
-            return await self._chat_non_streaming(ctx, route, started)
+            try:
+                return await self._chat_non_streaming(ctx, route, started)
+            finally:
+                self._release_concurrency(ctx)
         except GatewayError as exc:
             self._finish_error(ctx, exc, started)
             raise
@@ -304,6 +343,7 @@ class GatewayApp:
                 raise NotFoundError(f"model {request.model!r} is not configured")
 
             await self.state.plugins.run_request(ctx)
+            self._acquire_concurrency(ctx)
 
             if ctx.cache_hit and ctx.response is not None:
                 ctx.status_code = 200
@@ -311,6 +351,7 @@ class GatewayApp:
                 self._record_usage_from_body(ctx, ctx.response)
                 self._metrics_finish(ctx)
                 await self.state.plugins.run_response(ctx)
+                self._release_concurrency(ctx)
                 return ctx.response  # type: ignore[return-value]
 
             result = await self.state_dispatcher().execute_embedding(route, payload)
@@ -343,6 +384,8 @@ class GatewayApp:
         except GatewayError as exc:
             self._finish_error(ctx, exc, started)
             raise
+        finally:
+            self._release_concurrency(ctx)
 
     # -- non-streaming -----------------------------------------------------------
 
@@ -414,6 +457,7 @@ class GatewayApp:
             yield _sse({"error": error.to_openai_error()["error"]})
             yield "data: [DONE]\n\n"
         finally:
+            self._release_concurrency(ctx)
             ctx.latency_s = time.perf_counter() - started
             if outcome.route is not None:
                 ctx.route = outcome.route
@@ -483,6 +527,10 @@ class GatewayApp:
             return
         ctx.cost_usd = usd
         self.metrics.inc_cost(ctx.model, usd)
+        identity = ctx.identity if isinstance(ctx.identity, dict) else {}
+        key_name = str(identity.get("name") or "")
+        if key_name and key_name != "anonymous":
+            self.metrics.inc_key_cost(key_name, usd)
 
     def _metrics_finish(self, ctx: PluginContext) -> None:
         provider = ctx.deployment.provider if ctx.deployment else "none"
@@ -505,7 +553,7 @@ class GatewayApp:
         plugin_name = getattr(exc, "plugin_name", None)
         if plugin_name:
             self.metrics.inc_plugin_rejection(plugin_name, exc.code)
-        if exc.code == "rate_limit_exceeded":
+        if exc.code in ("rate_limit_exceeded", "concurrency_exceeded"):
             self.metrics.inc_rate_limit(ctx.model)
         provider = ctx.deployment.provider if ctx.deployment else "none"
         self.metrics.observe_request(ctx.model, provider, exc.status_code, ctx.latency_s)
