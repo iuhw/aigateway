@@ -76,6 +76,17 @@ class StateBackend(ABC):
     async def get_spend(self, key: str) -> float:
         """Current total of a budget window counter."""
 
+    async def cache_get(self, key: str) -> dict[str, Any] | None:
+        """Fetch a cached response body; None on miss (or if unsupported).
+
+        The default returns None so backends that cannot hold cache entries
+        simply never produce hits — callers must not treat that as an error.
+        """
+        return None
+
+    async def cache_put(self, key: str, body: dict[str, Any], ttl_s: int) -> None:
+        """Store a response body under `key` for `ttl_s` seconds (no-op default)."""
+
     async def get_dynamic_keys(self) -> dict[str, dict[str, Any]]:
         """All admin-created (dynamic) virtual keys as {name: record}.
 
@@ -106,6 +117,7 @@ class InMemoryBackend(StateBackend):
         self._cooldowns: dict[str, float] = {}  # name -> expiry (monotonic)
         self._spend: dict[str, float] = {}
         self._dynamic_keys: dict[str, dict[str, Any]] = {}
+        self._cache: dict[str, tuple[float, dict[str, Any]]] = {}  # key -> (deadline, body)
 
     async def acquire_bucket(
         self, name: str, rate_per_minute: float, capacity: float, amount: float = 1.0
@@ -152,6 +164,19 @@ class InMemoryBackend(StateBackend):
     async def get_dynamic_keys(self) -> dict[str, dict[str, Any]]:
         return dict(self._dynamic_keys)
 
+    async def cache_get(self, key: str) -> dict[str, Any] | None:
+        entry = self._cache.get(key)
+        if entry is None:
+            return None
+        deadline, body = entry
+        if deadline <= time.monotonic():
+            del self._cache[key]
+            return None
+        return body
+
+    async def cache_put(self, key: str, body: dict[str, Any], ttl_s: int) -> None:
+        self._cache[key] = (time.monotonic() + ttl_s, body)
+
     async def set_dynamic_key(self, name: str, record: dict[str, Any]) -> None:
         self._dynamic_keys[name] = dict(record)
 
@@ -163,6 +188,7 @@ class InMemoryBackend(StateBackend):
         self._cooldowns.clear()
         self._spend.clear()
         self._dynamic_keys.clear()
+        self._cache.clear()
 
 
 class RedisBackend(StateBackend):
@@ -276,6 +302,28 @@ class RedisBackend(StateBackend):
             return float(value or 0.0)
         except Exception as exc:  # noqa: BLE001
             raise StateBackendError(f"redis get_spend failed: {exc}") from exc
+
+    def _cache_key(self, key: str) -> str:
+        return f"{self.key_prefix}:cache:{key}"
+
+    async def cache_get(self, key: str) -> dict[str, Any] | None:
+        try:
+            raw = await self._redis.get(self._cache_key(key))
+        except Exception as exc:  # noqa: BLE001
+            raise StateBackendError(f"redis cache_get failed: {exc}") from exc
+        if raw is None:
+            return None
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            return None  # corrupted entry counts as a miss
+        return body if isinstance(body, dict) else None
+
+    async def cache_put(self, key: str, body: dict[str, Any], ttl_s: int) -> None:
+        try:
+            await self._redis.set(self._cache_key(key), json.dumps(body), ex=max(1, int(ttl_s)))
+        except Exception as exc:  # noqa: BLE001
+            raise StateBackendError(f"redis cache_put failed: {exc}") from exc
 
     def _dynkeys_name(self) -> str:
         return f"{self.key_prefix}:dynkeys"

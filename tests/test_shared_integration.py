@@ -127,3 +127,39 @@ async def test_backend_error_visible_as_metric(tmp_path_factory, redis_url):
         dead = RedisBackend("redis://127.0.0.1:9/0")
         await dead.acquire_bucket("k", 10, 10)
     await backend.aclose()
+
+
+async def test_two_instances_share_exact_cache(tmp_path_factory, redis_url):
+    """Instance A fills the shared cache; identical request on B is a cache
+    hit without touching B's upstream provider."""
+    path = shared_config(
+        tmp_path_factory,
+        redis_url,
+        plugins={"response-cache-plugin": {"config": {"ttl_s": 300, "shared": True}}},
+    )
+    app_a = GatewayApp(path)
+    app_b = GatewayApp(path)
+    payload = {"model": "m1", "messages": [{"role": "user", "content": "cache share"}]}
+    first = await app_a.chat(dict(payload), {}, "test")
+    assert app_a.state.providers["p1"].call_count == 1  # A went upstream
+    second = await app_b.chat(dict(payload), {}, "test")
+    assert app_b.state.providers["p1"].call_count == 0  # B served from shared cache
+    assert second["choices"] == first["choices"]
+    await app_a.aclose()
+    await app_b.aclose()
+
+
+async def test_shared_cache_disabled_without_shared_state(tmp_path):
+    """shared=true without a shared_state backend degrades to in-process caching."""
+    from tests.conftest import base_config, write_config
+
+    config = base_config(
+        plugins={"response-cache-plugin": {"config": {"ttl_s": 300, "shared": True}}}
+    )
+    app = GatewayApp(write_config(tmp_path, config))
+    payload = {"model": "m1", "messages": [{"role": "user", "content": "degrade"}]}
+    await app.chat(dict(payload), {}, "test")
+    assert app.state.providers["p1"].call_count == 1
+    await app.chat(dict(payload), {}, "test")
+    assert app.state.providers["p1"].call_count == 1  # in-process hit
+    await app.aclose()

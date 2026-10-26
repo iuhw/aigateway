@@ -1,13 +1,22 @@
-"""Exact-match response cache plugin (LiteLLM `cache` / Higress `ai-cache`)."""
+"""Exact-match response cache plugin (LiteLLM `cache` / Higress `ai-cache`).
+
+Storage is in-process by default. With `shared: true` and a `shared_state`
+backend configured, entries live in the shared backend so N gateway replicas
+serve each other's cached responses (Redis: TTL-native; capacity bounds apply
+to the in-process store only — shared backends rely on TTL eviction).
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from typing import Any, ClassVar
 
 from aigateway.plugins.base import Plugin, PluginContext, register_plugin
+
+logger = logging.getLogger("aigateway.plugins.response_cache")
 
 
 def cache_key(model: str, payload: dict[str, Any]) -> str:
@@ -46,7 +55,27 @@ class ResponseCachePlugin(Plugin):
         self.ttl_s = float(self.config.get("ttl_s", 3600))
         self.max_entries = int(self.config.get("max_entries", 1024))
         self.cache_streaming = bool(self.config.get("cache_streaming", False))
+        self.shared = bool(self.config.get("shared", False))
         self._store: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._backend: Any = None  # injected via set_shared (GatewayApp)
+        self._shared_warned = False
+
+    def set_shared(self, backend: Any, metrics: Any = None) -> None:
+        """Called by GatewayApp to inject the shared-state backend."""
+        self._backend = backend
+
+    def _shared_ready(self) -> bool:
+        if not self.shared:
+            return False
+        if self._backend is None:
+            # `shared_state` not configured: degrade to in-process, warn once.
+            if not self._shared_warned:
+                logger.warning(
+                    "response-cache shared=true but no shared_state backend; using in-process cache"
+                )
+                self._shared_warned = True
+            return False
+        return True
 
     def _evict_if_needed(self) -> None:
         if len(self._store) <= self.max_entries:
@@ -78,7 +107,14 @@ class ResponseCachePlugin(Plugin):
             return
         key = cache_key(ctx.model, ctx.payload)
         ctx.state[self.display_name()] = {"key": key}
-        hit = self.get(key)
+        hit: dict[str, Any] | None = None
+        if self._shared_ready():
+            try:
+                hit = await self._backend.cache_get(key)
+            except Exception:  # noqa: BLE001 - cache failures must not break the request
+                logger.exception("shared cache_get failed; treating as miss")
+        else:
+            hit = self.get(key)
         if hit is not None:
             ctx.cache_hit = True
             ctx.response = hit
@@ -91,4 +127,10 @@ class ResponseCachePlugin(Plugin):
             return
         if ctx.status_code != 200:
             return
-        self.put(state["key"], ctx.response)
+        if self._shared_ready():
+            try:
+                await self._backend.cache_put(state["key"], ctx.response, int(self.ttl_s))
+            except Exception:  # noqa: BLE001
+                logger.exception("shared cache_put failed; skipping cache fill")
+        else:
+            self.put(state["key"], ctx.response)
