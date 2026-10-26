@@ -87,6 +87,7 @@ class GatewayApp:
 
     def _materialize(self, config: GatewayConfig) -> GatewayState:
         from aigateway.plugins.rate_limit import RateLimitPlugin
+        from aigateway.plugins.semantic_cache import SemanticCachePlugin
 
         state = GatewayState(
             config=config,
@@ -104,7 +105,37 @@ class GatewayApp:
                     # Other stateful plugins (e.g. auth budget ledger) share
                     # the same backend the rate limiter uses.
                     plugin.set_shared(self._shared_backend, self.metrics)
+        for plugin in state.plugins.plugins:
+            if isinstance(plugin, SemanticCachePlugin):
+                plugin.set_embed_fn(self._plugin_embed_fn(plugin.embed_model))
         return state
+
+    def _plugin_embed_fn(self, embed_model: str):
+        """Embed texts for plugins through the routing/failover machinery that
+        /v1/embeddings uses (dispatcher-level: no plugin chain, no recursion).
+        Returns None on any failure — callers must treat that as a bypass."""
+
+        async def _embed(texts: list[str]) -> list[list[float]] | None:
+            if not embed_model:
+                return None
+            try:
+                route = self.state.router.route(embed_model)
+                if route is None:
+                    logger.warning("semantic cache embed_model %r has no route; bypassing", embed_model)
+                    return None
+                result = await self.state_dispatcher().execute_embedding(route, {"input": texts})
+                if result.provider_status >= 400:
+                    return None
+                data = result.body.get("data")
+                vectors = [d.get("embedding") for d in data or [] if isinstance(d, dict)]
+                if len(vectors) != len(texts) or any(not isinstance(v, list) for v in vectors):
+                    return None
+                return vectors
+            except Exception:  # noqa: BLE001 - embed failure is never request-fatal
+                logger.exception("plugin embed via %r failed; bypassing", embed_model)
+                return None
+
+        return _embed
 
     async def start_config_watcher(self, interval_s: float = 5.0) -> None:
         if self._watch_task is not None:

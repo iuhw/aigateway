@@ -81,6 +81,12 @@ class Metrics:
             ("model", "result"),
             registry=r,
         )
+        self.semantic_cache_hits_total = Counter(
+            "gateway_semantic_cache_hits_total",
+            "Semantic (similarity) cache hits, distinguishable from exact hits",
+            ("model",),
+            registry=r,
+        )
         self.upstream_attempts_total = Counter(
             "gateway_upstream_attempts_total",
             "Upstream attempts by outcome",
@@ -128,6 +134,9 @@ class Metrics:
 
     def inc_cache(self, model: str, hit: bool) -> None:
         self.cache_requests_total.labels(model=model, result="hit" if hit else "miss").inc()
+
+    def inc_semantic_cache_hit(self, model: str) -> None:
+        self.semantic_cache_hits_total.labels(model=model).inc()
 
     def inc_attempt(self, model: str, provider: str, outcome: str) -> None:
         self.upstream_attempts_total.labels(model=model, provider=provider, outcome=outcome).inc()

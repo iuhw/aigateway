@@ -7,6 +7,7 @@ from aigateway.plugins.keyword_filter import KeywordFilterPlugin
 from aigateway.plugins.rate_limit import RateLimitPlugin
 from aigateway.plugins.request_log import RequestLogPlugin
 from aigateway.plugins.response_cache import ResponseCachePlugin
+from aigateway.plugins.semantic_cache import SemanticCachePlugin
 
 __all__ = [
     "AuthPlugin",
@@ -14,4 +15,5 @@ __all__ = [
     "RateLimitPlugin",
     "RequestLogPlugin",
     "ResponseCachePlugin",
+    "SemanticCachePlugin",
 ]

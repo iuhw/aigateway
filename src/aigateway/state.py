@@ -35,6 +35,18 @@ class StateBackendError(Exception):
     """Raised when the shared-state backend is unreachable."""
 
 
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Plain cosine; mismatched dimensions or zero vectors score 0.0."""
+    if not a or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b, strict=False))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(y * y for y in b) ** 0.5
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
 class StateBackend(ABC):
     """Async primitives for shared rate-limiting and cooldown state."""
 
@@ -87,6 +99,25 @@ class StateBackend(ABC):
     async def cache_put(self, key: str, body: dict[str, Any], ttl_s: int) -> None:
         """Store a response body under `key` for `ttl_s` seconds (no-op default)."""
 
+    async def vector_put(
+        self, namespace: str, key: str, vector: list[float], payload: dict[str, Any], ttl_s: int
+    ) -> None:
+        """Store a vector + payload under (namespace, key) for semantic search.
+
+        No-op default: backends without vector support simply never produce
+        semantic hits.
+        """
+
+    async def vector_search(
+        self, namespace: str, query: list[float], threshold: float, limit: int = 1
+    ) -> list[tuple[str, dict[str, Any], float]]:
+        """Brute-force cosine search within `namespace`; entries at or above
+        `threshold` returned best-first as (key, payload, similarity).
+
+        Empty default: backends without vector support never produce hits.
+        """
+        return []
+
     async def get_dynamic_keys(self) -> dict[str, dict[str, Any]]:
         """All admin-created (dynamic) virtual keys as {name: record}.
 
@@ -118,6 +149,8 @@ class InMemoryBackend(StateBackend):
         self._spend: dict[str, float] = {}
         self._dynamic_keys: dict[str, dict[str, Any]] = {}
         self._cache: dict[str, tuple[float, dict[str, Any]]] = {}  # key -> (deadline, body)
+        # namespace -> key -> (deadline, vector, payload)
+        self._vectors: dict[str, dict[str, tuple[float, list[float], dict[str, Any]]]] = {}
 
     async def acquire_bucket(
         self, name: str, rate_per_minute: float, capacity: float, amount: float = 1.0
@@ -177,6 +210,29 @@ class InMemoryBackend(StateBackend):
     async def cache_put(self, key: str, body: dict[str, Any], ttl_s: int) -> None:
         self._cache[key] = (time.monotonic() + ttl_s, body)
 
+    async def vector_put(
+        self, namespace: str, key: str, vector: list[float], payload: dict[str, Any], ttl_s: int
+    ) -> None:
+        self._vectors.setdefault(namespace, {})[key] = (time.monotonic() + ttl_s, vector, payload)
+
+    async def vector_search(
+        self, namespace: str, query: list[float], threshold: float, limit: int = 1
+    ) -> list[tuple[str, dict[str, Any], float]]:
+        entries = self._vectors.get(namespace)
+        if not entries:
+            return []
+        now = time.monotonic()
+        scored: list[tuple[float, str, dict[str, Any]]] = []
+        for key, (deadline, vector, payload) in list(entries.items()):
+            if deadline <= now:
+                del entries[key]  # lazy expiry
+                continue
+            similarity = cosine_similarity(query, vector)
+            if similarity >= threshold:
+                scored.append((similarity, key, payload))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [(key, payload, similarity) for similarity, key, payload in scored[:limit]]
+
     async def set_dynamic_key(self, name: str, record: dict[str, Any]) -> None:
         self._dynamic_keys[name] = dict(record)
 
@@ -189,6 +245,7 @@ class InMemoryBackend(StateBackend):
         self._spend.clear()
         self._dynamic_keys.clear()
         self._cache.clear()
+        self._vectors.clear()
 
 
 class RedisBackend(StateBackend):
@@ -324,6 +381,59 @@ class RedisBackend(StateBackend):
             await self._redis.set(self._cache_key(key), json.dumps(body), ex=max(1, int(ttl_s)))
         except Exception as exc:  # noqa: BLE001
             raise StateBackendError(f"redis cache_put failed: {exc}") from exc
+
+    def _vec_prefix(self, namespace: str) -> str:
+        return f"{self.key_prefix}:vec:{namespace}:"
+
+    async def vector_put(
+        self, namespace: str, key: str, vector: list[float], payload: dict[str, Any], ttl_s: int
+    ) -> None:
+        try:
+            entry = json.dumps({"v": vector, "p": payload})
+            await self._redis.set(
+                f"{self._vec_prefix(namespace)}{key}", entry, ex=max(1, int(ttl_s))
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise StateBackendError(f"redis vector_put failed: {exc}") from exc
+
+    async def vector_search(
+        self, namespace: str, query: list[float], threshold: float, limit: int = 1
+    ) -> list[tuple[str, dict[str, Any], float]]:
+        """Brute-force cosine over all entries in the namespace.
+
+        SCAN + per-entry GET keeps this dependency-free; the blueprint caps
+        namespaces at a few hundred entries (plugin max_entries semantics are
+        enforced per-instance for the in-memory store; Redis namespaces rely
+        on TTL eviction). Revisit with a dedicated index if namespaces grow.
+        """
+        try:
+            prefix = self._vec_prefix(namespace)
+            keys: list[str] = []
+            cursor: int | str = 0
+            while True:
+                cursor, batch = await self._redis.scan(cursor=cursor, match=f"{prefix}*", count=100)
+                keys.extend(batch)
+                if cursor == 0:
+                    break
+            scored: list[tuple[float, str, dict[str, Any]]] = []
+            for full_key in keys:
+                raw = await self._redis.get(full_key)
+                if not raw:
+                    continue
+                try:
+                    entry = json.loads(raw)
+                except ValueError:
+                    continue
+                vector, payload = entry.get("v"), entry.get("p")
+                if not isinstance(vector, list) or not isinstance(payload, dict):
+                    continue
+                similarity = cosine_similarity(query, vector)
+                if similarity >= threshold:
+                    scored.append((similarity, full_key.removeprefix(prefix), payload))
+            scored.sort(key=lambda item: item[0], reverse=True)
+            return [(key, payload, similarity) for similarity, key, payload in scored[:limit]]
+        except Exception as exc:  # noqa: BLE001
+            raise StateBackendError(f"redis vector_search failed: {exc}") from exc
 
     def _dynkeys_name(self) -> str:
         return f"{self.key_prefix}:dynkeys"
