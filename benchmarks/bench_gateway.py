@@ -249,6 +249,25 @@ async def main_async(args: argparse.Namespace) -> dict:
     scenarios["concurrency_scaling"] = scaling
     await client.aclose()
 
+    # ---- 8. semantic cache hit path ---------------------------------------------------
+    # Hit path cost including the embed step (in-process zero-latency mock:
+    # real deployments add the embed network roundtrip on top).
+    client, _tmp = make_client(
+        base_config(
+            extra_providers={"embed": {"type": "mock", "latency_s": 0.0}},
+            extra_models={"embed-mdl": {"deployments": [{"provider": "embed", "model": "embed-up"}]}},
+            plugins={
+                "semantic-cache-plugin": {
+                    "config": {"embed_model": "embed-mdl", "similarity_threshold": 0.99, "ttl_s": 300}
+                }
+            },
+        )
+    )
+    sem_hit_payload = {"model": "bench", "messages": [{"role": "user", "content": "same"}]}
+    await client.post("/v1/chat/completions", json=sem_hit_payload)  # populate
+    scenarios["semantic_cache_hit"] = await run_latency(client, lambda i: sem_hit_payload, int(500 * q), 8)
+    await client.aclose()
+
     return results
 
 
@@ -273,6 +292,7 @@ def render_markdown(results: dict) -> str:
         row("failover_cooldown_steady", "故障转移（冷却后稳态）"),
         row("cache_miss", "缓存 miss"),
         row("cache_hit", "缓存 hit"),
+        row("semantic_cache_hit", "语义缓存 hit（含 mock embed）"),
     ]
 
     base_p50 = s["baseline_nonstream"]["latency_ms_p50"]
@@ -309,6 +329,8 @@ def render_markdown(results: dict) -> str:
     lines.append(f"- 流式 TTFT 开销：{s['full_plugins_streaming']['ttft_ms_avg'] - s['baseline_streaming']['ttft_ms_avg']:+.3f} ms。")
     lines.append("- 故障转移：冷却稳态与基线持平；强制每次重试+切换的开销来自配置的退避时间（10ms），网关自身开销毫秒级。")
     lines.append("- 精确缓存命中略快于转发路径；上游为真实大模型（秒级延迟）时收益为秒级。")
+    lines.append(f"- 语义缓存命中路径 p50 {s['semantic_cache_hit']['latency_ms_p50']} ms"
+                 "（含进程内 mock embed 步骤；真实部署需另加 embed 网络往返）。")
     lines.append("- 并发 8→64 RPS 下降源于单进程 Python GIL 与事件循环争用；生产部署可用多 worker 横向扩展。")
     return "\n".join(lines) + "\n"
 
