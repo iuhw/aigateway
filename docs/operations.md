@@ -93,9 +93,12 @@
 3. **单机网络栈**：SO_REUSEPORT 多进程 / k8s 多 Pod 均可，但网关不提供 TLS——在入口层终结。
 4. **流式 block 过滤的窗口**：检测到关键词前的块已发出（与 Higress 同类插件的已知取舍）。
 5. **上游协议面**：OpenAI 协议（openai）+ 原生适配器 anthropic / gemini / bedrock（Converse，
-   SigV4 纯标准库实现）。适配器覆盖 chat + tools（含流式）；**embeddings 仅 openai 类型支持**——
-   不支持的部署按传输故障语义处理，调度器自动切换到支持 embeddings 的部署。
-6. **缓存为单键精确匹配**（进程内——同副本重复请求才命中；跨副本响应缓存在路线图）。
+   SigV4 纯标准库实现）。适配器覆盖 chat + tools（含流式）；**embeddings 支持 openai / gemini
+   （embedContent / batchEmbedContents）/ bedrock（Titan 逐条 invoke + 真实 token 数 / Cohere
+   批量）**——Anthropic 无一方 embeddings 端点（2026-10 核实），其部署按传输故障语义处理，
+   调度器自动切换到支持 embeddings 的部署（即走 openai 兼容上游的正确姿势）。
+6. **精确缓存**：默认进程内（同副本重复请求才命中）；`shared: true` 且配置 `shared_state`
+   后端时跨副本共享（Redis TTL 回收，容量上限仅对进程内存储生效）。
 7. **成本追踪**按 `pricing` 配置的单价计算，支持 cache-read/write 分层价（缺省回退 input 价）。
    预算硬限是 check-then-bill 语义：预算耗尽瞬间在途请求可能小幅超出；`usage` 缺失时按估算
    token 计价，估算口径下成本同样为近似值。账本随重启/热重载重建（Redis 后端除外）。
@@ -107,6 +110,11 @@
     缓存命中不计费（与预算口径一致），但配额耗尽后的请求一律 429（含本应命中缓存的请求）。
 11. **per-key 成本指标** `gateway_key_cost_usd_total` 的 `key` 标签基数有上限
     （`server.max_tracked_keys`，默认 100），超限聚合为 `other`。
+12. **语义缓存**（opt-in）：请求文本经网关 embeddings 管道向量化后按 cosine 相似度检索，
+    仅在「模型+采样参数+tools」分区内比较（参数不同绝不命中）；默认阈值 0.95、TTL 600s、
+    命中即计 `gateway_semantic_cache_hits_total`。miss 路径多一次 embed 往返（不可用时直通）；
+    流式与 embeddings 请求不参与；Redis 后端为暴力 SCAN 检索，命名空间应保持数百条以内
+    （`max_entries` 仅约束进程内存储），更大规模需专用向量索引（探索池）。
 
 ## 6. 升级与回滚
 

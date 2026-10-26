@@ -45,7 +45,8 @@ Envoy AI Gateway 的成熟设计自主实现（调研见 [docs/](docs/)）。
 | `keyword-filter-plugin` | 关键词检测过滤：block / mask 双模式；请求与响应双向；**流式跨块安全**（安全前缀切分算法） |
 | `auth-plugin` | Bearer 虚拟 key（明文/SHA-256），模型白名单，日/月美元预算硬限，**token 周期配额**，**key 生命周期**（`expires_at`/`concurrency`/`metadata`），**动态 key**（`/admin/keys` CRUD，共享后端覆盖层） |
 | `rate-limit-plugin` | token bucket 限流（模型级 / 身份级） |
-| `response-cache-plugin` | 精确匹配缓存 |
+| `response-cache-plugin` | 精确匹配缓存（默认进程内，`shared: true` 走共享后端跨副本） |
+| `semantic-cache-plugin` | **语义缓存**：prompts 经网关 embeddings 管道向量化，cosine 相似度检索；「模型+采样参数+tools」分区防误命中，默认阈值 0.95，embed 失败直通（opt-in，M2） |
 | `request-log-plugin` | 每请求 JSON 日志（文件轮转 / stdout） |
 
 - 插件链按 `order` 排序执行；钩子点：`on_request / on_response / on_stream_start / on_stream_chunk / on_stream_end / on_error`
@@ -91,7 +92,7 @@ client ──► FastAPI (api.py)
 ## 测试与基准
 
 ```bash
-.venv/Scripts/python -m pytest tests/ -q        # 251 个测试（含故障注入/混沌/多实例/安全/热重载/停机/tools/embeddings/预算/分层定价/租户治理/Admin API）
+.venv/Scripts/python -m pytest tests/ -q        # 281 个测试（含故障注入/混沌/多实例/安全/热重载/停机/tools/embeddings/原生适配器 embeddings/预算/分层定价/租户治理/Admin API/语义缓存）
 .venv/Scripts/python -m ruff check src tests    # lint
 .venv/Scripts/python benchmarks/bench_gateway.py  # 基准 → docs/benchmark-report.md
 
@@ -162,9 +163,9 @@ src/aigateway/
     dispatcher.py   重试/退避/故障转移/降级链/流式切换
   plugins/
     base.py         Plugin 接口、PluginChain、注册表、外部加载
-    keyword_filter.py / auth.py / rate_limit.py / response_cache.py / request_log.py
+    keyword_filter.py / auth.py / rate_limit.py / response_cache.py / request_log.py / semantic_cache.py
   observability/metrics.py   Prometheus 指标（含成本）
-tests/              251 tests（单元/集成/wire 故障注入/混沌/多实例/安全/热重载/停机/Anthropic/tools/embeddings/原生适配器/预算/定价/租户治理/Admin API）
+tests/              281 tests（单元/集成/wire 故障注入/混沌/多实例/安全/热重载/停机/Anthropic/tools/embeddings/原生适配器 embeddings/预算/定价/租户治理/Admin API/语义缓存）
 benchmarks/         基准测试（--quick 供 CI）
 scripts/            负载测试、soak 耐久、并行下载器、Ollama 安装、E2E 验证（13 项）
 deploy/             生产配置、Prometheus 抓取、Grafana 仪表盘与数据源

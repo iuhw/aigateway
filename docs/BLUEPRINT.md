@@ -66,7 +66,7 @@ v0.1 现状 ──► M1 治理 ──► M2 缓存 ──► M3 安全 ──�
     `GET /admin/usage`（按 key 预算余额与配额用量）。
 - **验收达成**：25 项新测试（生命周期/配额/并发/指标/Admin API/fakeredis 跨实例）。
 
-### M2（v0.3）语义缓存 —— 复用 embeddings 管道
+### M2（v0.3）语义缓存 —— 复用 embeddings 管道 ✅（2026-10-26 已交付）
 
 - **`semantic-cache-plugin`**：请求文本 → `provider.embed`（复用 M0 已有的 `/v1/embeddings`
   上游管道）→ 相似度检索（内存/Redis 两后端，与 `state.py` 语义对齐）；cosine 阈值可配，
@@ -80,6 +80,20 @@ v0.1 现状 ──► M1 治理 ──► M2 缓存 ──► M3 安全 ──�
 - **涉及模块**：新插件 `plugins/semantic_cache.py`、`state.py`（向量检索后端）、metrics。
 - **验收**：阈值边界与误命中防护测试集；流式请求不缓存沿用现有决策；embed 不可用时降级直通；
   命中路径延迟基准（目标 <1ms 不含 embed 往返）。
+- **交付记录**（2026-10-26 夜间迭代，281 tests）：
+  - `semantic-cache-plugin`：分区指纹（model+采样参数+tools）内 cosine 检索，默认阈值 0.95、
+    TTL 600s、容量 256，miss 经网关 embeddings 管道（dispatcher 级复用，无插件链递归）；
+    embed 失败/超时一律直通（fail-open）；流式与 embeddings 请求不参与；命中计
+    `gateway_semantic_cache_hits_total`（既有 hit/miss 计数不动）；
+  - 跨副本精确缓存：`StateBackend.cache_get/cache_put` 双后端 + `response-cache-plugin`
+    `shared: true`（无共享后端降级进程内并告警）；
+  - 原生适配器 embeddings：gemini（embedContent/batchEmbedContents）+ bedrock（Titan 逐条
+    真实 token 数 / Cohere 批量）；Anthropic 核实无一方端点（2026-10），保持失败转移语义；
+  - `StateBackend.vector_put/vector_search`：InMemory 暴力 + Redis SCAN 暴力（共享
+    `cosine_similarity`）；容量上限约束进程内存储，Redis 靠 TTL（operations.md 边界 12）；
+  - 验收达成：16 项新测试（分区隔离/阈值边界/fail-open/跨实例/流式跳过/容量淘汰/E2E 上游
+    节省）；基准回归 p50 0.422ms 基线、全插件链 +0.060ms（与 M1 的 +0.059ms 持平）、
+    语义命中路径 0.469ms（含 mock embed）< 1ms 目标。
 
 ### M3（v0.4）安全护栏插件组
 
