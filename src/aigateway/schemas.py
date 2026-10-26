@@ -80,6 +80,59 @@ def embedding_request_text(payload: dict[str, Any]) -> str:
     return ""
 
 
+def embedding_inputs(payload: dict[str, Any]) -> list[str]:
+    """Normalize an OpenAI embeddings `input` into plain texts for native APIs.
+
+    str -> [str]; list of str -> as-is; token-id arrays are joined with spaces
+    (the native upstreams are text-only; same convention as above).
+    """
+    value = payload.get("input")
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        texts: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                texts.append(item)
+            elif isinstance(item, list):
+                texts.append(" ".join(str(token) for token in item))
+            else:
+                texts.append(str(item))
+        return texts
+    return [str(value)]
+
+
+def embedding_list_body(
+    *,
+    model: str,
+    vectors: list[list[float]],
+    token_counts: list[int] | None = None,
+    texts: list[str] | None = None,
+) -> dict[str, Any]:
+    """OpenAI `/v1/embeddings` response body from raw vectors.
+
+    Usage: `token_counts` wins when the upstream reports real counts (Titan);
+    otherwise estimated from the input `texts` with the gateway's heuristic.
+    """
+    from aigateway.tokenizers import estimate_default
+
+    data = [{"object": "embedding", "index": i, "embedding": vector} for i, vector in enumerate(vectors)]
+    if token_counts:
+        total = sum(token_counts)
+    elif texts:
+        total = sum(estimate_default(text) for text in texts)
+    else:
+        total = 1
+    return {
+        "object": "list",
+        "data": data,
+        "model": model,
+        "usage": {"prompt_tokens": max(1, total), "total_tokens": max(1, total)},
+    }
+
+
 def cache_tokens_of(usage: dict[str, Any]) -> tuple[int, int]:
     """(cache_read, cache_write) token counts from a usage dict.
 

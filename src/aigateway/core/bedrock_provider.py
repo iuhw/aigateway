@@ -23,7 +23,7 @@ from aigateway.core.provider import (
     UpstreamUnavailable,
 )
 from aigateway.core.sigv4 import amz_date_now, sigv4_headers
-from aigateway.schemas import message_text
+from aigateway.schemas import embedding_inputs, embedding_list_body, message_text
 
 BEDROCK_STOP_REASON_TO_OPENAI = {
     "end_turn": "stop",
@@ -275,6 +275,96 @@ class BedrockProvider(Provider):
         if response.status_code < 400:
             parsed = from_converse_response(parsed, model=model)
         return ProviderResult(status=response.status_code, body=parsed, latency_s=latency)
+
+    async def embed(self, *, model: str, payload: dict[str, Any], timeout: float) -> ProviderResult:
+        """Embeddings via the Bedrock `invoke` API.
+
+        Model-family body shapes: Cohere (`cohere.embed-*`) batches all texts
+        in one call (`{"texts": [...], "input_type": ...}`); Titan
+        (`amazon.titan-embed-*` and the default) invokes once per text with
+        `{"inputText": ...}` and reports real token counts.
+        """
+        texts = embedding_inputs(payload)
+        if not texts:
+            return ProviderResult(
+                status=400,
+                body={"error": {"message": "embeddings input is required", "type": "invalid_request_error"}},
+                latency_s=0.0,
+            )
+        started = time.perf_counter()
+        if model.startswith("cohere.embed"):
+            body_dict: dict[str, Any] = {
+                "texts": texts,
+                "input_type": str(payload.get("input_type") or "search_document"),
+                "truncate": "END",
+            }
+            result = await self._invoke(model, body_dict, timeout)
+            if result.status >= 400:
+                return ProviderResult(
+                    status=result.status, body=result.body, latency_s=time.perf_counter() - started
+                )
+            raw = result.body.get("embeddings")
+            vectors = [v for v in raw if isinstance(v, list)] if isinstance(raw, list) else []
+            if len(vectors) != len(texts):
+                return ProviderResult(
+                    status=502,
+                    body={
+                        "error": {
+                            "message": "cohere embed response missing embeddings",
+                            "type": "upstream_invalid_body",
+                        }
+                    },
+                    latency_s=time.perf_counter() - started,
+                )
+            body = embedding_list_body(model=model, vectors=vectors, texts=texts)
+            return ProviderResult(status=200, body=body, latency_s=time.perf_counter() - started)
+
+        vectors: list[list[float]] = []
+        token_counts: list[int] = []
+        for text in texts:
+            result = await self._invoke(model, {"inputText": text}, timeout)
+            if result.status >= 400:
+                return ProviderResult(
+                    status=result.status, body=result.body, latency_s=time.perf_counter() - started
+                )
+            vector = result.body.get("embedding")
+            if not isinstance(vector, list):
+                return ProviderResult(
+                    status=502,
+                    body={
+                        "error": {
+                            "message": "titan embed response missing embedding",
+                            "type": "upstream_invalid_body",
+                        }
+                    },
+                    latency_s=time.perf_counter() - started,
+                )
+            vectors.append(vector)
+            token_counts.append(int(result.body.get("inputTextTokenCount") or 0))
+        body = embedding_list_body(model=model, vectors=vectors, token_counts=token_counts or None)
+        return ProviderResult(status=200, body=body, latency_s=time.perf_counter() - started)
+
+    async def _invoke(self, model: str, body_dict: dict[str, Any], timeout: float) -> ProviderResult:
+        """One SigV4-signed `invoke` call; transport failures raise UpstreamUnavailable."""
+        body_bytes = json.dumps(body_dict).encode("utf-8")
+        path = f"/model/{model}/invoke"
+        url = f"{self._client.base_url}model/{model}/invoke"
+        try:
+            response = await self._client.post(
+                path,
+                content=body_bytes,
+                headers={**self._signed_headers("POST", url, body_bytes), "Content-Type": "application/json"},
+                timeout=timeout,
+            )
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise UpstreamUnavailable(f"{self.name}: {type(exc).__name__}: {exc}") from exc
+        try:
+            parsed = response.json()
+        except ValueError:
+            parsed = {"error": {"message": response.text[:512], "type": "upstream_invalid_body"}}
+        if not isinstance(parsed, dict):
+            parsed = {"error": {"message": str(parsed)[:512], "type": "upstream_invalid_body"}}
+        return ProviderResult(status=response.status_code, body=parsed, latency_s=0.0)
 
     async def stream(
         self, *, model: str, payload: dict[str, Any], timeout: float

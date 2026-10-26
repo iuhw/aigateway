@@ -22,6 +22,7 @@ from aigateway.core.anthropic_provider import (
 from aigateway.core.bedrock_provider import BedrockProvider, to_converse_request
 from aigateway.core.gemini_provider import GeminiProvider, from_gemini_response, to_gemini_request
 from aigateway.core.sigv4 import sigv4_headers
+from tests.conftest import base_config, write_config
 
 OPENAI_PAYLOAD = {
     "messages": [{"role": "user", "content": "hi"}],
@@ -279,8 +280,7 @@ async def test_anthropic_stream_wire_translates_tool_use():
     tool_starts = [
         c
         for c in chunks
-        if c["choices"][0]["delta"].get("tool_calls")
-        and c["choices"][0]["delta"]["tool_calls"][0].get("id")
+        if c["choices"][0]["delta"].get("tool_calls") and c["choices"][0]["delta"]["tool_calls"][0].get("id")
     ]
     assert tool_starts[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["name"] == "wx"
     arg_frags = [
@@ -582,3 +582,147 @@ def test_sigv4_amz_date_now_shape():
     stamp = amz_date_now()
     assert len(stamp) == 16 and stamp.endswith("Z")
     datetime.strptime(stamp, "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)  # parses
+
+
+# ---- embeddings (native adapters) -----------------------------------------------------
+
+
+async def test_gemini_embed_single_wire():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"embedding": {"values": [0.1, 0.2, 0.3]}})
+
+    provider = make_gemini(handler)
+    result = await provider.embed(model="text-embedding-004", payload={"input": "hello"}, timeout=5)
+    assert captured["path"] == "/v1beta/models/text-embedding-004:embedContent"
+    assert captured["body"] == {"content": {"parts": [{"text": "hello"}]}}
+    assert result.ok
+    assert result.body["object"] == "list"
+    assert result.body["data"] == [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3]}]
+    assert result.body["model"] == "text-embedding-004"
+    assert result.body["usage"]["prompt_tokens"] >= 1
+
+
+async def test_gemini_embed_batch_wire():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200, json={"embeddings": [{"values": [1.0]}, {"values": [2.0]}, {"values": [3.0]}]}
+        )
+
+    provider = make_gemini(handler)
+    result = await provider.embed(
+        model="text-embedding-004", payload={"input": ["alpha", "beta", "gamma"]}, timeout=5
+    )
+    assert captured["path"] == "/v1beta/models/text-embedding-004:batchEmbedContents"
+    requests = captured["body"]["requests"]
+    assert [r["model"] for r in requests] == ["models/text-embedding-004"] * 3
+    assert [r["content"]["parts"][0]["text"] for r in requests] == ["alpha", "beta", "gamma"]
+    assert [d["index"] for d in result.body["data"]] == [0, 1, 2]
+    assert [d["embedding"] for d in result.body["data"]] == [[1.0], [2.0], [3.0]]
+
+
+async def test_gemini_embed_error_passthrough():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"message": "bad model", "status": "INVALID_ARGUMENT"}})
+
+    provider = make_gemini(handler)
+    result = await provider.embed(model="nope", payload={"input": "x"}, timeout=5)
+    assert result.status == 400 and not result.ok
+    assert result.body["error"]["message"] == "bad model"  # raw upstream error, not mangled
+
+
+async def test_bedrock_embed_titan_wire():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["authorization"] = request.headers.get("authorization")
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"embedding": [0.5, -0.5], "inputTextTokenCount": 4})
+
+    provider = make_bedrock(handler)
+    result = await provider.embed(
+        model="amazon.titan-embed-text-v2:0", payload={"input": "embed me"}, timeout=5
+    )
+    assert captured["path"] == "/model/amazon.titan-embed-text-v2:0/invoke"
+    assert captured["authorization"].startswith("AWS4-HMAC-SHA256 Credential=AKIATEST/")
+    assert "/us-east-1/bedrock/aws4_request" in captured["authorization"]
+    assert captured["body"] == {"inputText": "embed me"}
+    assert result.ok
+    assert result.body["data"][0]["embedding"] == [0.5, -0.5]
+    assert result.body["usage"]["prompt_tokens"] == 4  # real count from Titan
+
+
+async def test_bedrock_embed_titan_batch_invokes_per_text():
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"embedding": [1.0], "inputTextTokenCount": 2})
+
+    provider = make_bedrock(handler)
+    result = await provider.embed(
+        model="amazon.titan-embed-text-v2:0", payload={"input": ["a", "bb", "ccc"]}, timeout=5
+    )
+    assert [b["inputText"] for b in bodies] == ["a", "bb", "ccc"]  # one invoke per text
+    assert len(result.body["data"]) == 3
+    assert result.body["usage"]["prompt_tokens"] == 6
+
+
+async def test_bedrock_embed_cohere_wire():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"embeddings": [[0.1], [0.2]], "id": "e1"})
+
+    provider = make_bedrock(handler)
+    result = await provider.embed(
+        model="cohere.embed-english-v3", payload={"input": ["one", "two"]}, timeout=5
+    )
+    assert captured["path"] == "/model/cohere.embed-english-v3/invoke"
+    assert captured["body"]["texts"] == ["one", "two"]
+    assert captured["body"]["input_type"] == "search_document"
+    assert result.ok
+    assert [d["embedding"] for d in result.body["data"]] == [[0.1], [0.2]]
+
+
+def test_embedding_inputs_normalization():
+    from aigateway.schemas import embedding_inputs
+
+    assert embedding_inputs({"input": "solo"}) == ["solo"]
+    assert embedding_inputs({"input": ["a", "b"]}) == ["a", "b"]
+    assert embedding_inputs({"input": [[1, 2], [3]]}) == ["1 2", "3"]  # token arrays joined
+    assert embedding_inputs({}) == []
+
+
+async def test_embeddings_endpoint_with_native_provider(tmp_path):
+    """E2E: /v1/embeddings serves through a native adapter swapped into the app."""
+    from aigateway.api import create_app
+
+    config = base_config(models={"m1": {"deployments": [{"provider": "g", "model": "text-embedding-004"}]}})
+    app = create_app(write_config(tmp_path, config), config_watcher=False)
+    try:
+        provider = make_gemini(
+            lambda request: httpx.Response(200, json={"embedding": {"values": [0.9, 0.8]}})
+        )
+        app.state.gateway.state.providers["g"] = provider
+        client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+        try:
+            response = await client.post("/v1/embeddings", json={"model": "m1", "input": "hi"})
+            assert response.status_code == 200
+            body = response.json()
+            assert body["data"][0]["embedding"] == [0.9, 0.8]
+            assert body["object"] == "list"
+        finally:
+            await client.aclose()
+    finally:
+        await app.state.gateway.aclose()

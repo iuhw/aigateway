@@ -21,7 +21,7 @@ from aigateway.core.provider import (
     UpstreamStreamError,
     UpstreamUnavailable,
 )
-from aigateway.schemas import message_text
+from aigateway.schemas import embedding_inputs, embedding_list_body, message_text
 
 DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com"
 
@@ -69,8 +69,11 @@ def to_gemini_request(payload: dict[str, Any]) -> dict[str, Any]:
                 result = {"content": raw_content if isinstance(raw_content, str) else message_text(message)}
             response = result if isinstance(result, dict) else {"result": result}
             part = {"functionResponse": {"name": name, "response": response}}
-            if contents and contents[-1]["role"] == "user" and contents[-1]["parts"] and all(
-                "functionResponse" in p for p in contents[-1]["parts"]
+            if (
+                contents
+                and contents[-1]["role"] == "user"
+                and contents[-1]["parts"]
+                and all("functionResponse" in p for p in contents[-1]["parts"])
             ):
                 contents[-1]["parts"].append(part)
                 continue
@@ -144,6 +147,26 @@ def to_gemini_request(payload: dict[str, Any]) -> dict[str, Any]:
 def _candidate_of(body: dict[str, Any]) -> dict[str, Any]:
     candidates = body.get("candidates") or []
     return candidates[0] if candidates and isinstance(candidates[0], dict) else {}
+
+
+def from_gemini_embedding(body: dict[str, Any], *, model: str, texts: list[str]) -> dict[str, Any] | None:
+    """Gemini embedContent/batchEmbedContents body -> OpenAI embeddings body.
+
+    Returns None when the body carries no recognizable embeddings (error passthrough).
+    """
+    if isinstance(body.get("embedding"), dict):  # single embedContent
+        values = body["embedding"].get("values")
+        if isinstance(values, list):
+            return embedding_list_body(model=model, vectors=[values], texts=texts)
+        return None
+    embeddings = body.get("embeddings")  # batchEmbedContents
+    if isinstance(embeddings, list):
+        vectors = [
+            e.get("values") for e in embeddings if isinstance(e, dict) and isinstance(e.get("values"), list)
+        ]
+        if len(vectors) == len(texts) and texts:
+            return embedding_list_body(model=model, vectors=vectors, texts=texts)
+    return None
 
 
 def from_gemini_response(body: dict[str, Any], *, model: str) -> dict[str, Any]:
@@ -239,6 +262,48 @@ class GeminiProvider(Provider):
             parsed = {"error": {"message": str(parsed)[:512], "type": "upstream_invalid_body"}}
         if response.status_code < 400:
             parsed = from_gemini_response(parsed, model=model)
+        return ProviderResult(status=response.status_code, body=parsed, latency_s=latency)
+
+    async def embed(self, *, model: str, payload: dict[str, Any], timeout: float) -> ProviderResult:
+        """Embeddings via `:embedContent` (single) / `:batchEmbedContents` (batch).
+
+        Gemini reports no token counts on these endpoints; usage is estimated
+        with the gateway's heuristic estimator (same one used when upstreams
+        omit usage elsewhere).
+        """
+        texts = embedding_inputs(payload)
+        if not texts:
+            return ProviderResult(
+                status=400,
+                body={"error": {"message": "embeddings input is required", "type": "invalid_request_error"}},
+                latency_s=0.0,
+            )
+        if len(texts) == 1:
+            path = self._path(model, stream=False).replace(":generateContent", ":embedContent")
+            body: dict[str, Any] = {"content": {"parts": [{"text": texts[0]}]}}
+        else:
+            path = self._path(model, stream=False).replace(":generateContent", ":batchEmbedContents")
+            body = {
+                "requests": [
+                    {"model": f"models/{model}", "content": {"parts": [{"text": text}]}} for text in texts
+                ]
+            }
+        started = time.perf_counter()
+        try:
+            response = await self._client.post(path, json=body, timeout=timeout)
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise UpstreamUnavailable(f"{self.name}: {type(exc).__name__}: {exc}") from exc
+        latency = time.perf_counter() - started
+        try:
+            parsed = response.json()
+        except ValueError:
+            parsed = {"error": {"message": response.text[:512], "type": "upstream_invalid_body"}}
+        if not isinstance(parsed, dict):
+            parsed = {"error": {"message": str(parsed)[:512], "type": "upstream_invalid_body"}}
+        if response.status_code < 400:
+            converted = from_gemini_embedding(parsed, model=model, texts=texts)
+            if converted is not None:
+                parsed = converted
         return ProviderResult(status=response.status_code, body=parsed, latency_s=latency)
 
     async def stream(
