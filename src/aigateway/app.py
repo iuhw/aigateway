@@ -106,6 +106,9 @@ class GatewayApp:
                     # the same backend the rate limiter uses.
                     plugin.set_shared(self._shared_backend, self.metrics)
         for plugin in state.plugins.plugins:
+            if hasattr(plugin, "set_metrics"):
+                plugin.set_metrics(self.metrics)
+        for plugin in state.plugins.plugins:
             if isinstance(plugin, SemanticCachePlugin):
                 plugin.set_embed_fn(self._plugin_embed_fn(plugin.embed_model))
         return state

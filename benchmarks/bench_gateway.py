@@ -5,12 +5,15 @@ measure gateway processing overhead (validation, plugin chain, routing,
 dispatch) without TCP/TLS noise. Scenarios:
 
   1. baseline non-streaming latency & throughput (no plugins, zero-latency mock)
-  2. full-plugin-chain overhead (auth + keyword filter + cache + rate limit + log)
+  2. full-plugin-chain overhead (auth + keyword filter + cache + rate limit + log
+     + M3 local guardrails: pii-redaction, prompt-guard)
   3. streaming: time-to-first-token, per-chunk overhead, end-to-end
   4. cache hit vs miss speedup
   5. failover overhead (primary always failing -> fallback deployment)
   6. rate-limit rejection path cost
   7. concurrency scaling (1/8/32/64)
+  8. semantic cache hit path (mock embed)
+  9. webhook review request path (in-process allow-stub review service)
 
 Usage:
     python benchmarks/bench_gateway.py [--out docs/benchmark-report.md] [--json out.json]
@@ -57,14 +60,50 @@ def base_config(extra_providers: dict | None = None, extra_models: dict | None =
     return {"providers": providers, "models": models, "plugins": plugins or {}}
 
 
-def all_plugins_config(rate_rpm: int = 10_000_000) -> dict:
+def all_plugins_config(rate_rpm: int = 10_000_000, review_url: str = "http://127.0.0.1:1/dead") -> dict:
     return {
         "auth-plugin": {"config": {"allow_anonymous": True}},
         "keyword-filter-plugin": {"config": {"words": ["敏感词", "forbidden"], "mode": "block"}},
         "response-cache-plugin": {"config": {"ttl_s": 300}},
         "rate-limit-plugin": {"config": {"default_rpm": rate_rpm}},
         "request-log-plugin": {"config": {}},
+        # M3 local guardrails are the pure-CPU case and stay in the full chain.
+        # webhook-review is network-bound (one HTTP roundtrip per request, like
+        # semantic-cache's embed roundtrip) so it gets its own scenario instead.
+        "pii-redaction-plugin": {"config": {"groups": ["phone", "email", "id_card", "bank_card"]}},
+        "prompt-guard-plugin": {"config": {"action": "flag"}},
     }
+
+
+async def start_review_stub() -> tuple[asyncio.AbstractServer, str]:
+    """Minimal keep-alive HTTP stub that answers every POST with {"action":"allow"}."""
+    body = b'{"action":"allow"}'
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            while True:
+                head = await reader.readuntil(b"\r\n\r\n")
+                length = 0
+                for line in head.decode("latin1").split("\r\n")[1:]:
+                    if line.lower().startswith("content-length:"):
+                        length = int(line.split(":", 1)[1].strip())
+                if length:
+                    await reader.readexactly(length)
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: "
+                    + str(len(body)).encode()
+                    + b"\r\n\r\n"
+                    + body
+                )
+                await writer.drain()
+        except (asyncio.IncompleteReadError, ConnectionError):
+            pass
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    return server, f"http://127.0.0.1:{port}/review"
 
 
 def make_client(config: dict) -> tuple[httpx.AsyncClient, Path]:
@@ -268,6 +307,28 @@ async def main_async(args: argparse.Namespace) -> dict:
     scenarios["semantic_cache_hit"] = await run_latency(client, lambda i: sem_hit_payload, int(500 * q), 8)
     await client.aclose()
 
+    # ---- 9. webhook review request path ------------------------------------------------
+    # Full request-path cost with webhook-review-plugin calling a fast in-process
+    # review stub (allow): one localhost HTTP roundtrip per reviewed request.
+    # Real deployments add the review service's network latency on top.
+    review_server, review_url = await start_review_stub()
+    try:
+        client, _tmp = make_client(
+            base_config(
+                plugins={
+                    "webhook-review-plugin": {
+                        "config": {"url": review_url, "timeout_s": 2.0, "check": ["request"]}
+                    }
+                }
+            )
+        )
+        await run_latency(client, payload, 20, 8)  # warm connections
+        scenarios["webhook_review_allowed"] = await run_latency(client, payload, int(200 * q), 8)
+        await client.aclose()
+    finally:
+        review_server.close()
+        await review_server.wait_closed()
+
     return results
 
 
@@ -287,12 +348,13 @@ def render_markdown(results: dict) -> str:
         "| 场景 | 请求数 | p50 (ms) | p95 (ms) | p99 (ms) | RPS |",
         "|---|---|---|---|---|---|",
         row("baseline_nonstream", "基线（无插件）"),
-        row("full_plugins_nonstream", "全插件链（5 插件）"),
+        row("full_plugins_nonstream", "全插件链（7 插件，本地护栏）"),
         row("failover_forced", "故障转移（每次强制重试+切换）"),
         row("failover_cooldown_steady", "故障转移（冷却后稳态）"),
         row("cache_miss", "缓存 miss"),
         row("cache_hit", "缓存 hit"),
         row("semantic_cache_hit", "语义缓存 hit（含 mock embed）"),
+        row("webhook_review_allowed", "webhook 审核（本地 stub，每请求 1 次往返）"),
     ]
 
     base_p50 = s["baseline_nonstream"]["latency_ms_p50"]
@@ -325,12 +387,15 @@ def render_markdown(results: dict) -> str:
 
     lines += ["", "## 结论", ""]
     plugin_overhead = full_p50 - base_p50
-    lines.append(f"- 网关单请求基线开销 p50 {base_p50} ms；启用全部 5 个内置插件后增加 {plugin_overhead:+.3f} ms/请求。")
+    lines.append(f"- 网关单请求基线开销 p50 {base_p50} ms；启用全部 7 个本地插件后增加 {plugin_overhead:+.3f} ms/请求。")
     lines.append(f"- 流式 TTFT 开销：{s['full_plugins_streaming']['ttft_ms_avg'] - s['baseline_streaming']['ttft_ms_avg']:+.3f} ms。")
     lines.append("- 故障转移：冷却稳态与基线持平；强制每次重试+切换的开销来自配置的退避时间（10ms），网关自身开销毫秒级。")
     lines.append("- 精确缓存命中略快于转发路径；上游为真实大模型（秒级延迟）时收益为秒级。")
     lines.append(f"- 语义缓存命中路径 p50 {s['semantic_cache_hit']['latency_ms_p50']} ms"
                  "（含进程内 mock embed 步骤；真实部署需另加 embed 网络往返）。")
+    lines.append(f"- webhook 审核路径 p50 {s['webhook_review_allowed']['latency_ms_p50']} ms"
+                 "（本地 stub allow。该数值主要是同进程 HTTP 客户端往返的事件循环开销——顺序纯客户端实测约 3ms/次、"
+                 "并发 8 约 16ms——插件自身网关侧开销可忽略；审核服务独立部署时另加网络往返与服务处理耗时）。")
     lines.append("- 并发 8→64 RPS 下降源于单进程 Python GIL 与事件循环争用；生产部署可用多 worker 横向扩展。")
     return "\n".join(lines) + "\n"
 

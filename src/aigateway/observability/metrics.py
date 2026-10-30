@@ -93,6 +93,12 @@ class Metrics:
             ("model", "provider", "outcome"),
             registry=r,
         )
+        self.guardrail_flags_total = Counter(
+            "gateway_guardrail_flags_total",
+            "Guardrail verdicts (prompt-guard flags/blocks, webhook-review outcomes)",
+            ("plugin", "verdict"),
+            registry=r,
+        )
 
     # -- convenience wrappers -------------------------------------------------
 
@@ -137,6 +143,9 @@ class Metrics:
 
     def inc_semantic_cache_hit(self, model: str) -> None:
         self.semantic_cache_hits_total.labels(model=model).inc()
+
+    def inc_guardrail_flag(self, plugin: str, verdict: str) -> None:
+        self.guardrail_flags_total.labels(plugin=plugin, verdict=verdict).inc()
 
     def inc_attempt(self, model: str, provider: str, outcome: str) -> None:
         self.upstream_attempts_total.labels(model=model, provider=provider, outcome=outcome).inc()
