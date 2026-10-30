@@ -221,6 +221,8 @@ async def main_async(args: argparse.Namespace) -> int:
         f"- 模拟上游延迟 {args.upstream_latency_s}s，并发 {args.concurrency}，每臂每阶段 {args.duration_s}s",
         "- 方法：网关臂与直连臂（同一 mock 上游、无网关逻辑）在相同真实 HTTP 环境下对测，",
         "  网关开销 = 两臂延迟差，抵消客户端/事件循环/时钟噪声。",
+        "- 网关臂启用全部 7 个本地插件（auth/keyword/cache/rate-limit/log/pii-redaction/"
+        "prompt-guard）；webhook-review 为网络型插件，同基准口径单列（见基准报告场景 9）。",
         "",
         "## 非流式",
         f"- 网关：{gw_ns['rps']} RPS，错误率 {gw_ns['error_rate_pct']}%，p50/p99 {_ms(gw_ns['latency_p50_s'])} / {_ms(gw_ns['latency_p99_s'])}",
@@ -259,6 +261,10 @@ def _body(i: int) -> dict:
 def _write_gateway_config(latency_s: float) -> str:
     import tempfile
 
+    # Full LOCAL plugin chain (matches benchmarks/bench_gateway.py
+    # all_plugins_config). webhook-review is excluded for the same reason as in
+    # the benchmark: it is network-bound (one HTTP roundtrip per request) and
+    # measured separately there (scenario 9), not against the local-overhead SLO.
     config = {
         "providers": {"real": {"type": "mock", "latency_s": latency_s}},
         "models": {
@@ -268,7 +274,17 @@ def _write_gateway_config(latency_s: float) -> str:
                 "retry_backoff_s": 0.05,
             }
         },
-        "plugins": {},
+        "plugins": {
+            "auth-plugin": {"config": {"allow_anonymous": True}},
+            "keyword-filter-plugin": {"config": {"words": ["敏感词", "forbidden"], "mode": "block"}},
+            "response-cache-plugin": {"config": {"ttl_s": 300}},
+            "rate-limit-plugin": {"config": {"default_rpm": 10_000_000}},
+            "request-log-plugin": {"config": {}},
+            "pii-redaction-plugin": {
+                "config": {"groups": ["phone", "email", "id_card", "bank_card"]}
+            },
+            "prompt-guard-plugin": {"config": {"action": "flag"}},
+        },
     }
     tmp = Path(tempfile.mkdtemp(prefix="aigw-load-")) / "gateway.yaml"
     tmp.write_text(yaml.safe_dump(config), encoding="utf-8")

@@ -108,9 +108,9 @@ client ──► FastAPI (api.py)
 量化结论（报告见 docs/）：
 
 - **网关自身开销** p50 0.42ms（~2400 RPS 单进程），全插件链（7 插件，含护栏）+0.07ms，语义命中 0.461ms，webhook 审核路径见基准报告场景 9
-- **真实 HTTP 双臂对测**：非流式开销 p99 -4.4ms（与直连同水平）、TTFT 开销 p50 1.4ms，错误率 0%
+- **真实 HTTP 双臂对测**（全 7 插件链）：非流式开销 p99 -9.2ms（与直连同水平）、TTFT 开销 p50 -9.5ms，错误率 0%
 - **混沌注入**（30% 随机故障+延迟，300 请求）：零挂起、100% 终态映射、>97% 成功率
-- **耐久**：5 分钟 @400 RPS 零错误，RSS 斜率 +0.021 MB/min（无泄漏迹象）
+- **耐久**：10 分钟 @300 RPS 零错误（全 7 插件链），RSS 斜率 +0.054 MB/min（无泄漏迹象）
 
 ## Ollama 端到端验证
 
@@ -170,7 +170,7 @@ src/aigateway/
   observability/metrics.py   Prometheus 指标（含成本）
 tests/              339 tests（单元/集成/wire 故障注入/混沌/多实例/安全/热重载/停机/Anthropic/tools/embeddings/原生适配器 embeddings/预算/定价/租户治理/Admin API/语义缓存/PII/注入防护/webhook 审核）
 benchmarks/         基准测试（--quick 供 CI）
-scripts/            负载测试、soak 耐久、并行下载器、Ollama 安装、E2E 验证（13 项）
+scripts/            负载测试、soak 耐久、并行下载器、Ollama 安装、E2E 验证（16 项，含 M3 护栏）
 deploy/             生产配置、Prometheus 抓取、Grafana 仪表盘与数据源
 docs/               调研（3 篇）、项目蓝图与复盘、基准/负载/soak/E2E 报告、运维手册
 ```

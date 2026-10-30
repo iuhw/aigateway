@@ -81,3 +81,19 @@ plugins:
     config:
       path: logs/e2e-requests.jsonl
       log_prompt: false
+  # ---- M3 guardrails (validated by checks 14-16 in validate_e2e.py) ----------
+  pii-redaction-plugin:
+    config:
+      groups: [phone, email, id_card, bank_card]
+      action: mask
+      check: [request, response]
+  prompt-guard-plugin:
+    config:
+      action: block                 # E2E prompts are benign (0 FP on the sample set)
+      threshold: 1.0
+  webhook-review-plugin:
+    # validate_e2e.py starts a local allow-stub on this port before the app.
+    config:
+      url: "http://127.0.0.1:11439/review"
+      timeout_s: 2.0
+      check: [request]

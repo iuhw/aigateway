@@ -107,6 +107,7 @@ async def main_async(args: argparse.Namespace) -> int:
         "",
         f"- 时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
         f"- 时长：{elapsed_total / 60:.1f} 分钟 @ {args.rps} RPS（共 {total} 请求，错误 {errors}）",
+        "- 插件链：全部 7 个本地插件（auth/keyword/cache/rate-limit/log/pii-redaction/prompt-guard）",
         f"- RSS：起始 {samples[0][1]:.1f} MB → 结束 {samples[-1][1]:.1f} MB"
         f"（斜率 {rss_slope:+.3f} MB/min，后半程净增 {rss_growth_total:+.1f} MB）",
         f"- 句柄：斜率 {handle_slope:+.2f} /min" if handle_samples else "- 句柄：psutil 不可用",
@@ -174,6 +175,20 @@ def main() -> None:
             "providers": {
                 "fast": {"type": "mock", "latency_s": 0.005},
                 "fast2": {"type": "mock", "latency_s": 0.005},
+            },
+            # Full LOCAL plugin chain (matches benchmarks/bench_gateway.py): the
+            # soak exercises plugin-chain state (buffers, cache entries, log
+            # hooks) for leak detection, not just the bare routing path.
+            "plugins": {
+                "auth-plugin": {"config": {"allow_anonymous": True}},
+                "keyword-filter-plugin": {"config": {"words": ["敏感词", "forbidden"], "mode": "block"}},
+                "response-cache-plugin": {"config": {"ttl_s": 300}},
+                "rate-limit-plugin": {"config": {"default_rpm": 10_000_000}},
+                "request-log-plugin": {"config": {}},
+                "pii-redaction-plugin": {
+                    "config": {"groups": ["phone", "email", "id_card", "bank_card"]}
+                },
+                "prompt-guard-plugin": {"config": {"action": "flag"}},
             },
         }
         tmp = Path(tempfile.mkdtemp(prefix="aigw-soak-")) / "gateway.yaml"
