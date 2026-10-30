@@ -55,6 +55,7 @@
 | `gateway_rate_limit_rejections_total` | 突增 10x | 疑似攻击或客户端 bug |
 | `gateway_upstream_attempts_total{outcome=...}` | failure 率 > 20% 持续 10 分钟 | 上游劣化，观察冷却/降级是否吸收 |
 | `gateway_plugin_rejections_total` | 突增 | 关键词过滤命中激增（业务事件） |
+| `gateway_guardrail_flags_total{verdict="blocked"}` | 突增 | 护栏 block 判定激增（prompt-guard/webhook-review）；`verdict="timeout"\|"error"` 持续 > 0 提示审核服务不可达（fail-open 裸奔中） |
 | `gateway_cache_requests_total` hit ratio | 突降 | 缓存失效模式变化（可接受） |
 
 ## 4. Runbook（常见事故）
@@ -115,6 +116,19 @@
     命中即计 `gateway_semantic_cache_hits_total`。miss 路径多一次 embed 往返（不可用时直通）；
     流式与 embeddings 请求不参与；Redis 后端为暴力 SCAN 检索，命名空间应保持数百条以内
     （`max_entries` 仅约束进程内存储），更大规模需专用向量索引（探索池）。
+13. **PII 脱敏**（opt-in）：变长正则的流式安全依赖 `holdback_chars`（默认 128）回拉切分——
+    自定义正则若可能超过该长度，会漏检缓冲区边缘的未完成匹配；block 模式流式下已发出块
+    不可撤回（同边界 4）。
+14. **提示词注入防护**（opt-in，默认 flag 观察模式）：规则组加权评分，`override`/`delimiters`
+    为强信号（权重 1.0 单条即达默认阈值），`role_override`/`evasion` 为弱信号（0.5 需两条
+    佐证）——阈值/权重可配，接入真实流量后先用 flag 模式观察误报再切 block。
+    `response` 检查仅覆盖非流式响应（流式不扫，见 webhook-review 边界的同款取舍）。
+15. **webhook 审核**（opt-in）：审核调用在请求路径上——其延迟直接叠加到每个被审请求；
+    网关侧自身的 HTTP 客户端开销实测约 3ms/次（同进程 stub 顺序实测，见基准报告场景 9），
+    独立部署审核服务另加网络往返。审核服务不可用时按 `on_unavailable`（fail-open 默认 /
+    fail-close 503）。**流式响应只能送达后补审**（块不可撤回）：流结束时送审，block 判定仅
+    记录与告警（`gateway_guardrail_flags_total{verdict="blocked"}` + ERROR 日志），需联动
+    事后的账号级处置。
 
 ## 6. 升级与回滚
 

@@ -143,3 +143,26 @@ plugins:
       stdout: false
       log_prompt: false
       log_response: false
+  # ---- M3 safety guardrails (all opt-in; delete the block to disable) --------
+  # pii-redaction-plugin:
+  #   config:
+  #     groups: [phone, email, id_card, bank_card]   # built-ins + custom_patterns
+  #     custom_patterns: ["project-\\d{4}"]
+  #     action: mask                  # mask | block (block -> 400 pii_detected)
+  #     check: [request, response]
+  #     holdback_chars: 128           # streaming safety window (>= longest pattern)
+  # prompt-guard-plugin:
+  #   config:
+  #     action: flag                  # flag (observe) | block (400 prompt_injection_detected)
+  #     threshold: 1.0                # score >= threshold counts as injection
+  #     weights: {override: 1.0, delimiters: 1.0, role_override: 0.5, evasion: 0.5}
+  #     custom_patterns: [{pattern: "acme-internal", weight: 0.5}]
+  #     check: [request]              # response check is non-streaming only
+  # webhook-review-plugin:
+  #   config:
+  #     url: "http://review-svc:8080/check"   # required, absolute
+  #     headers: {authorization: "Bearer ..."}# extra auth headers if needed
+  #     timeout_s: 2.0
+  #     on_unavailable: fail-open     # fail-open | fail-close (503)
+  #     check: [request, response]    # streamed responses reviewed after delivery
+  #     max_text_chars: 20000

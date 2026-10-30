@@ -95,7 +95,7 @@ v0.1 现状 ──► M1 治理 ──► M2 缓存 ──► M3 安全 ──�
     节省）；基准回归 p50 0.422ms 基线、全插件链 +0.060ms（与 M1 的 +0.059ms 持平）、
     语义命中路径 0.469ms（含 mock embed）< 1ms 目标。
 
-### M3（v0.4）安全护栏插件组
+### M3（v0.4）安全护栏插件组 ✅（2026-10-30 已交付）
 
 - **`pii-redaction-plugin`**：规则组（手机号/邮箱/身份证/银行卡/自定义正则），request/response
   双向 + block/mask 双动作，**复用关键词过滤的流式安全前缀切分算法**（现成资产）。
@@ -105,6 +105,24 @@ v0.1 现状 ──► M1 治理 ──► M2 缓存 ──► M3 安全 ──�
 - **涉及模块**：三个新插件；`base.py` 不变（验证插件接口表达力）。
 - **验收**：流式 PII 掩码跨块安全测试（复用关键词过滤测试基建）；注入样本集误报/漏报统计；
   插件链全开时基准开销增幅 <10%。
+- **交付记录**（2026-10-30 迭代，339 tests）：
+  - `pii-redaction-plugin`（骨架缓冲阶段落地，`f255b15`）：4 内置正则组 + mask/block +
+    流式跨界回拉切分（较 keyword_filter 的变长正则适配），18 项测试；
+  - `prompt-guard-plugin`：4 内置规则组（override/role_override/delimiters/evasion，中英双语）
+    加权评分——强信号 1.0 单条即达阈值、弱信号 0.5 需两条佐证；默认 **flag 观察模式**
+    （先量误报再切 block），`gateway_guardrail_flags_total{plugin,verdict}` 计数；
+    验收样本集：注入 18 例检测率 100%（零漏报）、良性 16 例误报率 0%（严格子集零规则命中），
+    17 项测试；
+  - `webhook-review-plugin`：统一 wire 契约（POST 文本 → `{"action":"allow|block","reason"}`），
+    fail-open 默认 / fail-close（503 `webhook_review_unavailable`）；流式响应送达后补审
+    （block 判定记录+ERROR 日志，块不可撤回）；`max_text_chars` 截断保护，23 项测试；
+  - 核心侧最小改动：新指标 `gateway_guardrail_flags_total` + `set_metrics` 注入约定
+    （对齐 `set_shared` 惯例）、Anthropic 入口补 4 个护栏错误码映射；`base.py` 钩子未变
+    （验证通过：两个插件均为纯插件实现）；
+  - 基准达成：全插件链（7 插件，含 pii+prompt-guard）+0.069ms（基线 p50 0.418ms →
+    0.487ms；M2 为 +0.060ms，门槛 <10% 达标）；新增基准场景 9「webhook 审核路径」
+    （本地 stub；数值为同进程 HTTP 客户端往返口径，插件自身开销可忽略，见报告注明）；
+    语义命中 0.461ms（<1ms 目标，与 M2 的 0.469ms 持平）。
 
 ### M4（v0.5）可观测深化
 

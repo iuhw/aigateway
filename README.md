@@ -48,6 +48,9 @@ Envoy AI Gateway 的成熟设计自主实现（调研见 [docs/](docs/)）。
 | `response-cache-plugin` | 精确匹配缓存（默认进程内，`shared: true` 走共享后端跨副本） |
 | `semantic-cache-plugin` | **语义缓存**：prompts 经网关 embeddings 管道向量化，cosine 相似度检索；「模型+采样参数+tools」分区防误命中，默认阈值 0.95，embed 失败直通（opt-in，M2） |
 | `request-log-plugin` | 每请求 JSON 日志（文件轮转 / stdout） |
+| `pii-redaction-plugin` | **PII 脱敏**（M3）：手机号/邮箱/身份证/银行卡 + 自定义正则；mask/block 双动作；**流式跨界回拉切分**（变长正则安全） |
+| `prompt-guard-plugin` | **提示词注入防护**（M3）：4 规则组（指令覆盖/角色劫持/模板标记/编码规避，中英双语）加权评分；默认 flag 观察模式，误报可校准（阈值/权重可配） |
+| `webhook-review-plugin` | **外部内容审核**（M3）：请求/响应送 webhook 审核服务（对接云厂商内容安全）；fail-open/fail-close 可配；流式响应送达后补审 |
 
 - 插件链按 `order` 排序执行；钩子点：`on_request / on_response / on_stream_start / on_stream_chunk / on_stream_end / on_error`
 - **第三方插件零侵入**：外部 Python 模块即可注册（配置 `module`/`class`，或 `@register_plugin` 装饰器）
@@ -92,7 +95,7 @@ client ──► FastAPI (api.py)
 ## 测试与基准
 
 ```bash
-.venv/Scripts/python -m pytest tests/ -q        # 281 个测试（含故障注入/混沌/多实例/安全/热重载/停机/tools/embeddings/原生适配器 embeddings/预算/分层定价/租户治理/Admin API/语义缓存）
+.venv/Scripts/python -m pytest tests/ -q        # 339 个测试（含故障注入/混沌/多实例/安全/热重载/停机/tools/embeddings/原生适配器 embeddings/预算/分层定价/租户治理/Admin API/语义缓存/PII 脱敏/提示词注入防护/webhook 审核）
 .venv/Scripts/python -m ruff check src tests    # lint
 .venv/Scripts/python benchmarks/bench_gateway.py  # 基准 → docs/benchmark-report.md
 
@@ -104,7 +107,7 @@ client ──► FastAPI (api.py)
 
 量化结论（报告见 docs/）：
 
-- **网关自身开销** p50 0.44ms（~2100 RPS 单进程），全插件链 +0.06ms，流式 TTFT 开销 +0.03ms
+- **网关自身开销** p50 0.42ms（~2400 RPS 单进程），全插件链（7 插件，含护栏）+0.07ms，语义命中 0.461ms，webhook 审核路径见基准报告场景 9
 - **真实 HTTP 双臂对测**：非流式开销 p99 -4.4ms（与直连同水平）、TTFT 开销 p50 1.4ms，错误率 0%
 - **混沌注入**（30% 随机故障+延迟，300 请求）：零挂起、100% 终态映射、>97% 成功率
 - **耐久**：5 分钟 @400 RPS 零错误，RSS 斜率 +0.021 MB/min（无泄漏迹象）
@@ -137,7 +140,7 @@ aigateway serve --config gateway.prod.yaml --port 8080
 - SLO 与验证证据：[docs/operations.md](docs/operations.md) §2
 - 告警规则与 runbook（Redis 故障、上游劣化、配置回滚等 6 类场景）：[docs/operations.md](docs/operations.md) §3-4
 - 已知生产边界（token 级限流、TLS 终结点、流式过滤窗口等）：[docs/operations.md](docs/operations.md) §5
-- CI（GitHub Actions）：lint + 251 测试 + 基准 smoke + Docker 构建/健康检查
+- CI（GitHub Actions）：lint + 全量测试 + 基准 smoke + Docker 构建/健康检查
 
 ## 项目结构
 
@@ -163,9 +166,9 @@ src/aigateway/
     dispatcher.py   重试/退避/故障转移/降级链/流式切换
   plugins/
     base.py         Plugin 接口、PluginChain、注册表、外部加载
-    keyword_filter.py / auth.py / rate_limit.py / response_cache.py / request_log.py / semantic_cache.py
+    keyword_filter.py / pii_redaction.py / prompt_guard.py / webhook_review.py / auth.py / rate_limit.py / response_cache.py / request_log.py / semantic_cache.py
   observability/metrics.py   Prometheus 指标（含成本）
-tests/              281 tests（单元/集成/wire 故障注入/混沌/多实例/安全/热重载/停机/Anthropic/tools/embeddings/原生适配器 embeddings/预算/定价/租户治理/Admin API/语义缓存）
+tests/              339 tests（单元/集成/wire 故障注入/混沌/多实例/安全/热重载/停机/Anthropic/tools/embeddings/原生适配器 embeddings/预算/定价/租户治理/Admin API/语义缓存/PII/注入防护/webhook 审核）
 benchmarks/         基准测试（--quick 供 CI）
 scripts/            负载测试、soak 耐久、并行下载器、Ollama 安装、E2E 验证（13 项）
 deploy/             生产配置、Prometheus 抓取、Grafana 仪表盘与数据源
