@@ -124,7 +124,7 @@ v0.1 现状 ──► M1 治理 ──► M2 缓存 ──► M3 安全 ──�
     （本地 stub；数值为同进程 HTTP 客户端往返口径，插件自身开销可忽略，见报告注明）；
     语义命中 0.461ms（<1ms 目标，与 M2 的 0.469ms 持平）。
 
-### M4（v0.5）可观测深化
+### M4（v0.5）可观测深化 ✅（2026-11-01 已交付）
 
 - **`otel-export-plugin`**（可选依赖 extra `[otel]`）：OTLP 导出 traces（每请求 span +
   上游尝试子 span + TTFT 事件）；**`langfuse-export-plugin`**（可选）。
@@ -132,6 +132,31 @@ v0.1 现状 ──► M1 治理 ──► M2 缓存 ──► M3 安全 ──�
   缓存命中率、护栏拦截率（`deploy/`）。
 - **涉及模块**：两个新插件、`api.py`、`deploy/`。
 - **验收**：本地 OTel collector 集成验证；面板与文档截图；导出失败不影响请求路径（fire-and-forget 测试）。
+- **交付记录**（2026-11-01 迭代，352 tests）：
+  - `otel-export-plugin`（`fae3179`）：OTLP/HTTP 导出，默认 BatchSpanProcessor（后台线程
+    导出，collector 故障零请求路径影响、永不 fail 请求）；span 只携带元数据（model/key/
+    tokens/cost/status/TTFT），绝无 prompt/completion 内容；采样 `ParentBased(TraceIdRatioBased)`
+    可配；9 项测试 + **真实导出链路集成测试**（真 OTLPSpanExporter → 本地 stub collector →
+    protobuf 解码断言）；
+  - **上游子 span 策略**：常规"单次尝试成功"每请求仅 1 个 span（调度数字——attempts、
+    upstream_latency_s、provider——记父 span 属性），**多尝试（retry/failover）或失败调度**
+    才导出 `gateway.upstream` CLIENT 子 span——子 span 出现在真正需要单独分析调度的地方，
+    常规路径成本减半；app.py 仅透传 `attempts`/调度窗口三个字段（base.py 新增 3 个可选
+    字段，钩子未变；dispatcher 未动，per-attempt 粒度仍归指标/日志，见 operations 边界）；
+  - `usage-report-plugin`（`1487ea7`）：内存环形记录（`max_records` × `retention_hours`
+    双重上限）+ `/admin/usage` 扩展为预算快照 + **report 段**（按 key/model/小时或天桶聚合，
+    查询参数 key/model/hours/bucket）；每请求路径代价 = 一次 deque append（隔离实测 +2µs）；
+    per-replica 视图（多副本聚合由 Prometheus/OTLP 承担）；
+  - `langfuse-export-plugin`（`9c6c740`）：Langfuse 原生 OTLP 端点 preset（host/public_key/
+    secret_key → Basic auth），完全复用 otel-export 机器；
+  - Grafana 面板（`deploy/`）+4：per-key 成本、护栏 verdict 分布、per-model 成本、语义缓存
+    命中（与既有缓存命中率互补）；
+  - 基准达成：**背靠背同时窗对比**口径下，M4 可观测插件在全插件链之上 +0.046ms
+    （0.502 → 0.548ms，增幅 +9.2%，门槛 <10% 达标）；隔离实测 otel ≈ +0.04ms、
+    usage-report ≈ +0.007ms。基准方法学两项修正（见 bench 脚本注释）：场景邻接消除
+    跨场景机器漂移；otel 按"丢弃导出器"口径测量（保留型导出器会以 GC 压力歪曲数字）；
+  - fire-and-forget 验收：导出器抛异常（Simple/Batch 两口径）请求均正常完成，shutdown
+    同样安全；客户端中途断开时 span 不完整、由 SDK 丢弃（不泄漏，见 operations 边界）。
 
 ### M5（v0.6）提示词工程与灰度
 

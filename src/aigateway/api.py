@@ -40,7 +40,7 @@ def create_app(config_path: str, *, config_watcher: bool = True) -> FastAPI:
         yield
         await gateway.aclose()
 
-    app = FastAPI(title="aigateway", version="0.1.0", docs_url="/docs", redoc_url=None, lifespan=lifespan)
+    app = FastAPI(title="aigateway", version="0.5.0", docs_url="/docs", redoc_url=None, lifespan=lifespan)
     app.state.gateway = gateway
 
     if not (gateway.state.config.section("server") or {}).get("admin_api_key"):

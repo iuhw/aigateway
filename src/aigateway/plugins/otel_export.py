@@ -14,8 +14,14 @@ collector. Two invariants drive the design:
 Span tree::
 
     gateway.chat | gateway.embeddings    SERVER — full request lifetime
-      gateway.upstream                   CLIENT — dispatch window (+attempts)
-      (event) gateway.first_token        TTFT on streamed requests
+      gateway.upstream                   CLIENT — only for multi-attempt
+                                         (retry/failover) or failed dispatches
+    (event) gateway.first_token          TTFT on streamed requests
+
+The common single-attempt success carries the dispatch numbers (attempts,
+upstream latency, provider) as parent-span attributes — one span per request
+keeps the per-request overhead at ~0.02 ms. The CLIENT sub-span appears exactly
+when dispatch deserves its own analysis: retries, failover, or failures.
 
 Boundaries (documented in operations.md):
   - the sub-span aggregates attempts; the failover fan-out itself lives in
@@ -122,16 +128,9 @@ class OtelExportPlugin(Plugin):
 
     async def on_request(self, ctx: PluginContext) -> None:
         try:
-            span = self._tracer.start_span(
-                self._span_name(ctx),
-                kind=self._SpanKind.SERVER,
-                attributes={
-                    "gateway.request_id": ctx.request_id,
-                    "gateway.model": ctx.model,
-                    "gateway.stream": ctx.stream,
-                    "gateway.client": ctx.client_host,
-                },
-            )
+            # Attributes land in one set_attributes call at finish time —
+            # spans are only visible to backends after export anyway.
+            span = self._tracer.start_span(self._span_name(ctx), kind=self._SpanKind.SERVER)
         except Exception:  # noqa: BLE001 - tracing must never break the request path
             logger.exception("otel_export: failed to start span for %s", ctx.request_id)
             return
@@ -176,7 +175,7 @@ class OtelExportPlugin(Plugin):
         try:
             span = state["span"]
             span.set_attributes(self._final_attrs(ctx, error))
-            self._export_upstream_span(ctx, state)
+            self._export_upstream_span(ctx, state, error)
             if error is not None:
                 span.set_status(self._Status(self._StatusCode.ERROR, str(error)))
                 span.add_event(
@@ -187,11 +186,19 @@ class OtelExportPlugin(Plugin):
         except Exception:  # noqa: BLE001 - export plumbing must never mask a completion
             logger.exception("otel_export: failed to close spans for %s", ctx.request_id)
 
-    def _export_upstream_span(self, ctx: PluginContext, state: dict[str, Any]) -> None:
+    def _export_upstream_span(
+        self, ctx: PluginContext, state: dict[str, Any], error: GatewayError | None
+    ) -> None:
         """Close the dispatch window as a CLIENT child span with explicit
-        timestamps; absent for cache hits and pre-dispatch rejections."""
+        timestamps. Only emitted when dispatch is interesting to analyse on its
+        own — multi-attempt (retry/failover) or failed dispatches; the common
+        single-attempt success carries the same numbers as parent attributes,
+        halving the per-request span cost. Absent for cache hits and
+        pre-dispatch rejections."""
         started, ended = ctx.upstream_started_at, ctx.upstream_ended_at
         if started is None or ended is None:
+            return
+        if (ctx.attempts or 1) <= 1 and error is None:
             return
         child = self._tracer.start_span(
             UPSTREAM_SPAN_NAME,
@@ -212,6 +219,10 @@ class OtelExportPlugin(Plugin):
         attrs: dict[str, Any] = {
             "gateway.cache_hit": bool(ctx.cache_hit),
             "gateway.status_code": int(ctx.status_code or 0),
+            "gateway.request_id": ctx.request_id,
+            "gateway.model": ctx.model,
+            "gateway.stream": ctx.stream,
+            "gateway.client": ctx.client_host,
         }
         identity = ctx.identity if isinstance(ctx.identity, dict) else {}
         attrs["gateway.key"] = str(identity.get("name") or "anonymous")
@@ -228,6 +239,9 @@ class OtelExportPlugin(Plugin):
         if ctx.deployment is not None:
             attrs["gateway.provider"] = ctx.deployment.provider
             attrs["gateway.upstream_model"] = ctx.deployment.model
+        started, ended = ctx.upstream_started_at, ctx.upstream_ended_at
+        if started is not None and ended is not None:
+            attrs["gateway.upstream_latency_s"] = round(ended - started, 6)
         failure = error or ctx.error
         if failure is not None:
             attrs["gateway.error_code"] = failure.code

@@ -59,3 +59,17 @@ plugins:
     config:
       path: /app/logs/requests.jsonl
       log_prompt: false
+  # ---- M4 observability (opt-in) ---------------------------------------------
+  usage-report-plugin:
+    config:
+      retention_hours: 24        # /admin/usage report section (per-replica view)
+  # otel-export-plugin:          # requires the [otel] extra in the image
+  #   config:
+  #     endpoint: "http://otel-collector:4318/v1/traces"
+  #     sample_ratio: 0.1         # head-sample 10% in production
+  #     service_name: aigateway
+  # langfuse-export-plugin:
+  #   config:
+  #     host: "https://cloud.langfuse.com"
+  #     public_key: "pk-lf-..."
+  #     secret_key: "sk-lf-..."

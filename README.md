@@ -34,7 +34,8 @@ Envoy AI Gateway 的成熟设计自主实现（调研见 [docs/](docs/)）。
 - 缓存：精确匹配响应缓存（TTL + 容量淘汰）
 - 可观测性：Prometheus 指标（请求/延迟/TTFT/token/插件拒绝/缓存命中/上游尝试/后端错误/成本/按 key 成本）、
   结构化 JSON 请求日志（轮转）、`/healthz` `/readyz` `/metrics` `/admin/routes` `/admin/plugins`
-  `/admin/keys`（虚拟 key 列表与动态 key CRUD）`/admin/usage`（按 key 用量/余额）
+  `/admin/keys`（虚拟 key 列表与动态 key CRUD）`/admin/usage`（按 key 用量/余额 + **key/model/时间桶用量报表**）、
+  **OTLP 分布式追踪导出**（opt-in）+ Grafana 面板（成本/缓存命中/护栏拦截，`deploy/`）
 - 运维：YAML 配置 + **热重载**（改坏自动保留旧状态）、`aigateway check` 配置校验 CLI、
   Dockerfile + docker-compose（含 Redis/Ollama/Prometheus/Grafana 全家桶）
 
@@ -51,6 +52,9 @@ Envoy AI Gateway 的成熟设计自主实现（调研见 [docs/](docs/)）。
 | `pii-redaction-plugin` | **PII 脱敏**（M3）：手机号/邮箱/身份证/银行卡 + 自定义正则；mask/block 双动作；**流式跨界回拉切分**（变长正则安全） |
 | `prompt-guard-plugin` | **提示词注入防护**（M3）：4 规则组（指令覆盖/角色劫持/模板标记/编码规避，中英双语）加权评分；默认 flag 观察模式，误报可校准（阈值/权重可配） |
 | `webhook-review-plugin` | **外部内容审核**（M3）：请求/响应送 webhook 审核服务（对接云厂商内容安全）；fail-open/fail-close 可配；流式响应送达后补审 |
+| `otel-export-plugin` | **OTLP 追踪导出**（M4，`pip install 'aigateway[otel]'`）：每请求 span + TTFT 事件，多尝试/失败调度附 `gateway.upstream` 子 span；BatchSpanProcessor 后台导出（collector 故障零请求路径影响）；span 只含元数据、绝无内容；采样率可配 |
+| `langfuse-export-plugin` | **Langfuse 追踪导出**（M4）：Langfuse 原生 OTLP preset（host + public/secret key Basic auth），复用 otel-export 全部机制 |
+| `usage-report-plugin` | **用量报表**（M4）：`/admin/usage` report 段按 key/model/小时或天桶聚合；内存环形存储（容量/保留期双上限，per-replica 视图） |
 
 - 插件链按 `order` 排序执行；钩子点：`on_request / on_response / on_stream_start / on_stream_chunk / on_stream_end / on_error`
 - **第三方插件零侵入**：外部 Python 模块即可注册（配置 `module`/`class`，或 `@register_plugin` 装饰器）
@@ -95,7 +99,7 @@ client ──► FastAPI (api.py)
 ## 测试与基准
 
 ```bash
-.venv/Scripts/python -m pytest tests/ -q        # 339 个测试（含故障注入/混沌/多实例/安全/热重载/停机/tools/embeddings/原生适配器 embeddings/预算/分层定价/租户治理/Admin API/语义缓存/PII 脱敏/提示词注入防护/webhook 审核）
+.venv/Scripts/python -m pytest tests/ -q        # 352 个测试（含故障注入/混沌/多实例/安全/热重载/停机/tools/embeddings/原生适配器 embeddings/预算/分层定价/租户治理/Admin API/语义缓存/PII 脱敏/提示词注入防护/webhook 审核/OTLP 导出/真实 OTLP wire/用量报表）
 .venv/Scripts/python -m ruff check src tests    # lint
 .venv/Scripts/python benchmarks/bench_gateway.py  # 基准 → docs/benchmark-report.md
 
@@ -107,7 +111,9 @@ client ──► FastAPI (api.py)
 
 量化结论（报告见 docs/）：
 
-- **网关自身开销** p50 0.42ms（~2400 RPS 单进程），全插件链（7 插件，含护栏）+0.07ms，语义命中 0.461ms，webhook 审核路径见基准报告场景 9
+- **网关自身开销** p50 0.42ms（~2400 RPS 单进程），全插件链（7 插件，含护栏）+0.07ms，
+  M4 可观测插件（otel 导出 + 用量报表）再 +0.046ms（背靠背同窗对比，<10% 门槛达标），
+  语义命中 0.461ms，webhook 审核路径见基准报告场景 9
 - **真实 HTTP 双臂对测**（全 7 插件链）：非流式开销 p99 -9.2ms（与直连同水平）、TTFT 开销 p50 -9.5ms，错误率 0%
 - **混沌注入**（30% 随机故障+延迟，300 请求）：零挂起、100% 终态映射、>97% 成功率
 - **耐久**：10 分钟 @300 RPS 零错误（全 7 插件链），RSS 斜率 +0.054 MB/min（无泄漏迹象）
@@ -167,8 +173,9 @@ src/aigateway/
   plugins/
     base.py         Plugin 接口、PluginChain、注册表、外部加载
     keyword_filter.py / pii_redaction.py / prompt_guard.py / webhook_review.py / auth.py / rate_limit.py / response_cache.py / request_log.py / semantic_cache.py
+    otel_export.py / langfuse_export.py / usage_report.py   （M4 可观测导出与报表）
   observability/metrics.py   Prometheus 指标（含成本）
-tests/              339 tests（单元/集成/wire 故障注入/混沌/多实例/安全/热重载/停机/Anthropic/tools/embeddings/原生适配器 embeddings/预算/定价/租户治理/Admin API/语义缓存/PII/注入防护/webhook 审核）
+tests/              352 tests（单元/集成/wire 故障注入/混沌/多实例/安全/热重载/停机/Anthropic/tools/embeddings/原生适配器 embeddings/预算/定价/租户治理/Admin API/语义缓存/PII/注入防护/webhook 审核/OTLP 导出与真实 wire/用量报表）
 benchmarks/         基准测试（--quick 供 CI）
 scripts/            负载测试、soak 耐久、并行下载器、Ollama 安装、E2E 验证（16 项，含 M3 护栏）
 deploy/             生产配置、Prometheus 抓取、Grafana 仪表盘与数据源

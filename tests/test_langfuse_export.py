@@ -67,6 +67,6 @@ async def test_spans_reach_the_exporter_with_service_name(tmp_path, span_exporte
     finally:
         await app.aclose()
     spans = span_exporter.get_finished_spans()
-    assert len(spans) == 2  # parent + upstream
+    assert len(spans) == 1  # single-attempt success: parent span only
     parent = next(s for s in spans if s.name == REQUEST_SPAN_CHAT)
     assert parent.resource.attributes["service.name"] == "aigateway-prod"

@@ -129,6 +129,19 @@
     fail-close 503）。**流式响应只能送达后补审**（块不可撤回）：流结束时送审，block 判定仅
     记录与告警（`gateway_guardrail_flags_total{verdict="blocked"}` + ERROR 日志），需联动
     事后的账号级处置。
+16. **OTLP 导出**（opt-in，`pip install 'aigateway[otel]'`）：默认 BatchSpanProcessor 在
+    **后台线程**导出——collector 故障/超时只丢遥测、零请求路径影响、永不 fail 请求
+    （导出器抛异常亦有双重防护）；shutdown 时 force_flush 至多阻塞 `timeout_s`。
+    span 只含元数据（model/key/tokens/cost/status/TTFT/attempts），**绝无 prompt/响应内容**；
+    采样 `sample_ratio` 头部采样（子 span 跟随根决策）。**上游子 span 仅在多尝试
+    （retry/failover）或失败调度时导出**——常规单次成功以父 span 属性携带调度数字
+    （每请求 1 个 span，开销 ~0.04ms）；per-attempt 粒度（第 N 次尝试打到了哪个部署）
+    属于调度器内部，由日志与 `gateway_upstream_attempts_total` 承担，不进 trace。
+    客户端中途断开的流式请求 span 不完整、由 SDK 丢弃（不导出、不泄漏）。
+17. **usage 报表**（opt-in）：`/admin/usage` 的 `report` 段为 **per-replica 内存视图**
+    （环形缓冲双重上限：`max_records` 最旧丢弃、`retention_hours` 过期剪除）——
+    多副本部署下各副本各报各的；跨副本/长期视图用 Prometheus + Grafana 面板
+    （`deploy/`）或 OTLP 导出聚合。报表只含元数据不含内容。
 
 ## 6. 升级与回滚
 

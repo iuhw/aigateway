@@ -46,7 +46,9 @@ def percentile(values: list[float], p: float) -> float:
     return ordered[index]
 
 
-def base_config(extra_providers: dict | None = None, extra_models: dict | None = None, plugins: dict | None = None) -> dict:
+def base_config(
+    extra_providers: dict | None = None, extra_models: dict | None = None, plugins: dict | None = None
+) -> dict:
     providers = {
         "fast": {"type": "mock", "latency_s": 0.0},
     }
@@ -73,6 +75,36 @@ def all_plugins_config(rate_rpm: int = 10_000_000, review_url: str = "http://127
         "pii-redaction-plugin": {"config": {"groups": ["phone", "email", "id_card", "bank_card"]}},
         "prompt-guard-plugin": {"config": {"action": "flag"}},
     }
+
+
+def m4_plugins_config() -> dict:
+    """M3 chain + the M4 observability plugins (usage report + OTel export)."""
+    return {
+        **all_plugins_config(),
+        "usage-report-plugin": {"config": {}},
+        "otel-export-plugin": {"config": {"endpoint": "http://127.0.0.1:1/v1/traces"}},
+    }
+
+
+def install_bench_otel_processor() -> None:
+    """Swap the OTLP exporter for a discarding one while keeping the default
+    BatchSpanProcessor. The request path (span build + bounded enqueue) is
+    measured exactly as shipped; the worker thread drops batches instead of
+    POSTing them. A retention-heavy exporter (e.g. in-memory) would distort the
+    numbers via GC pressure — production backends consume spans off-thread."""
+    from aigateway.plugins.otel_export import OtelExportPlugin
+
+    class DiscardingExporter:
+        def export(self, spans):
+            return 0  # drop on the floor: bounded queue retention only
+
+        def shutdown(self):
+            return True
+
+        def force_flush(self, timeout_millis=None):
+            return True
+
+    OtelExportPlugin._build_span_exporter = lambda self: DiscardingExporter()  # type: ignore[method-assign]
 
 
 async def start_review_stub() -> tuple[asyncio.AbstractServer, str]:
@@ -112,6 +144,15 @@ def make_client(config: dict) -> tuple[httpx.AsyncClient, Path]:
     config_path.write_text(yaml.safe_dump(config, allow_unicode=True), encoding="utf-8")
     app = create_app(str(config_path), config_watcher=False)
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://bench"), tmp
+
+
+async def close_client(client: httpx.AsyncClient) -> None:
+    """Close the ASGI client AND the gateway behind it — plugins may hold
+    background workers (e.g. the otel exporter thread) that would otherwise
+    leak into the next scenario's measurement window."""
+    await client.aclose()
+    gateway = client._transport.app.state.gateway  # type: ignore[attr-defined]
+    await gateway.aclose()
 
 
 async def run_latency(client: httpx.AsyncClient, payload_fn, n: int, concurrency: int) -> dict:
@@ -199,34 +240,48 @@ async def main_async(args: argparse.Namespace) -> dict:
     payload = lambda i: {"model": "bench", "messages": [{"role": "user", "content": f"msg {i}"}]}
     await run_latency(client, payload, 50, 8)  # warmup
     scenarios["baseline_nonstream"] = await run_latency(client, payload, int(1000 * q), 8)
-    await client.aclose()
+    await close_client(client)
 
     # ---- 2. full plugin chain overhead --------------------------------------
+    # The M4 variant runs BACK-TO-BACK with the M3 chain so the comparison
+    # shares one measurement window (machine drift between distant scenarios
+    # can dwarf sub-0.1ms plugin deltas).
+    install_bench_otel_processor()
     client, _tmp = make_client(base_config(plugins=all_plugins_config()))
     await run_latency(client, payload, 50, 8)
     scenarios["full_plugins_nonstream"] = await run_latency(client, payload, int(1000 * q), 8)
-    await client.aclose()
+    await close_client(client)
+
+    client, _tmp = make_client(base_config(plugins=m4_plugins_config()))
+    await run_latency(client, payload, 50, 8)
+    scenarios["m4_full_plugins_nonstream"] = await run_latency(client, payload, int(1000 * q), 8)
+    await close_client(client)
 
     # ---- 3. streaming --------------------------------------------------------
     client, _tmp = make_client(base_config())
     scenarios["baseline_streaming"] = await run_streaming(client, int(300 * q))
-    await client.aclose()
+    await close_client(client)
 
     client, _tmp = make_client(base_config(plugins=all_plugins_config()))
     scenarios["full_plugins_streaming"] = await run_streaming(client, int(300 * q))
-    await client.aclose()
+    await close_client(client)
+
+    client, _tmp = make_client(base_config(plugins=m4_plugins_config()))
+    scenarios["m4_full_plugins_streaming"] = await run_streaming(client, int(300 * q))
+    await close_client(client)
 
     # ---- 4. cache hit vs miss -------------------------------------------------
-    client, _tmp = make_client(
-        base_config(plugins={"response-cache-plugin": {"config": {"ttl_s": 300}}})
-    )
+    client, _tmp = make_client(base_config(plugins={"response-cache-plugin": {"config": {"ttl_s": 300}}}))
     hit_payload = {"model": "bench", "messages": [{"role": "user", "content": "same"}]}
     await client.post("/v1/chat/completions", json=hit_payload)  # populate
     scenarios["cache_hit"] = await run_latency(client, lambda i: hit_payload, int(500 * q), 8)
     scenarios["cache_miss"] = await run_latency(
-        client, lambda i: {"model": "bench", "messages": [{"role": "user", "content": f"miss {i}"}]}, int(500 * q), 8
+        client,
+        lambda i: {"model": "bench", "messages": [{"role": "user", "content": f"miss {i}"}]},
+        int(500 * q),
+        8,
     )
-    await client.aclose()
+    await close_client(client)
 
     # ---- 5. failover overhead ---------------------------------------------------
     # 5a. forced: every request hits the dead deployment first (no cooldown).
@@ -251,7 +306,7 @@ async def main_async(args: argparse.Namespace) -> dict:
     # goes dead -> retry dead -> failover to healthy, i.e. full retry+backoff cost.
     await run_latency(client, failover_payload, 10, 1)
     scenarios["failover_forced"] = await run_latency(client, failover_payload, int(100 * q) + 20, 1)
-    await client.aclose()
+    await close_client(client)
 
     # ---- 5b. steady state: cooldown kicks in, dead deployment skipped entirely.
     client, _tmp = make_client(
@@ -271,14 +326,12 @@ async def main_async(args: argparse.Namespace) -> dict:
     )
     await run_latency(client, failover_payload, 20, 4)  # trigger cooldown
     scenarios["failover_cooldown_steady"] = await run_latency(client, failover_payload, int(300 * q), 8)
-    await client.aclose()
+    await close_client(client)
 
     # ---- 6. rate-limit rejection path ---------------------------------------------
-    client, _tmp = make_client(
-        base_config(plugins={"rate-limit-plugin": {"config": {"default_rpm": 10}}})
-    )
+    client, _tmp = make_client(base_config(plugins={"rate-limit-plugin": {"config": {"default_rpm": 10}}}))
     scenarios["rate_limit_rejection"] = await run_latency(client, payload, int(200 * q), 8)
-    await client.aclose()
+    await close_client(client)
 
     # ---- 7. concurrency scaling (baseline) ------------------------------------------
     client, _tmp = make_client(base_config())
@@ -286,7 +339,7 @@ async def main_async(args: argparse.Namespace) -> dict:
     for concurrency in (1, 8, 32, 64):
         scaling[str(concurrency)] = await run_latency(client, payload, int(400 * q), concurrency)
     scenarios["concurrency_scaling"] = scaling
-    await client.aclose()
+    await close_client(client)
 
     # ---- 8. semantic cache hit path ---------------------------------------------------
     # Hit path cost including the embed step (in-process zero-latency mock:
@@ -305,7 +358,7 @@ async def main_async(args: argparse.Namespace) -> dict:
     sem_hit_payload = {"model": "bench", "messages": [{"role": "user", "content": "same"}]}
     await client.post("/v1/chat/completions", json=sem_hit_payload)  # populate
     scenarios["semantic_cache_hit"] = await run_latency(client, lambda i: sem_hit_payload, int(500 * q), 8)
-    await client.aclose()
+    await close_client(client)
 
     # ---- 9. webhook review request path ------------------------------------------------
     # Full request-path cost with webhook-review-plugin calling a fast in-process
@@ -324,27 +377,39 @@ async def main_async(args: argparse.Namespace) -> dict:
         )
         await run_latency(client, payload, 20, 8)  # warm connections
         scenarios["webhook_review_allowed"] = await run_latency(client, payload, int(200 * q), 8)
-        await client.aclose()
+        await close_client(client)
     finally:
         review_server.close()
         await review_server.wait_closed()
 
+    # ---- 10. M4 observability plugins on the full chain ---------------------------
+    # Measured back-to-back with the M3 chain in scenarios 2/3 (same window);
+    # nothing to run here.
     return results
 
 
 def render_markdown(results: dict) -> str:
     s = results["scenarios"]
-    lines = ["# aigateway 核心能力基准测试报告", "", f"生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
-             "", "测试方式：httpx ASGI 内存传输直连 FastAPI 应用（不含 TCP/TLS 栈）；上游为零延迟 mock provider，",
-             "因此数值反映网关自身的处理开销（校验 + 插件链 + 路由 + 调度）。", ""]
+    lines = [
+        "# aigateway 核心能力基准测试报告",
+        "",
+        f"生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+        "测试方式：httpx ASGI 内存传输直连 FastAPI 应用（不含 TCP/TLS 栈）；上游为零延迟 mock provider，",
+        "因此数值反映网关自身的处理开销（校验 + 插件链 + 路由 + 调度）。",
+        "",
+    ]
 
     def row(name: str, label: str) -> str:
         r = s[name]
-        return (f"| {label} | {r['n']} | {r['latency_ms_p50']} | {r['latency_ms_p95']} "
-                f"| {r['latency_ms_p99']} | {r['rps']} |")
+        return (
+            f"| {label} | {r['n']} | {r['latency_ms_p50']} | {r['latency_ms_p95']} "
+            f"| {r['latency_ms_p99']} | {r['rps']} |"
+        )
 
     lines += [
-        "## 非流式延迟与吞吐", "",
+        "## 非流式延迟与吞吐",
+        "",
         "| 场景 | 请求数 | p50 (ms) | p95 (ms) | p99 (ms) | RPS |",
         "|---|---|---|---|---|---|",
         row("baseline_nonstream", "基线（无插件）"),
@@ -355,13 +420,17 @@ def render_markdown(results: dict) -> str:
         row("cache_hit", "缓存 hit"),
         row("semantic_cache_hit", "语义缓存 hit（含 mock embed）"),
         row("webhook_review_allowed", "webhook 审核（本地 stub，每请求 1 次往返）"),
+        row("m4_full_plugins_nonstream", "全插件链 + M4 可观测（usage-report + otel Batch+丢弃导出）"),
     ]
 
     base_p50 = s["baseline_nonstream"]["latency_ms_p50"]
     full_p50 = s["full_plugins_nonstream"]["latency_ms_p50"]
+    m4_p50 = s["m4_full_plugins_nonstream"]["latency_ms_p50"]
     lines += [
         "",
         f"- 插件链开销：p50 {full_p50 - base_p50:+.3f} ms（基线 {base_p50} ms → 全插件 {full_p50} ms）",
+        f"- M4 可观测插件开销：p50 {m4_p50 - full_p50:+.3f} ms（全插件 {full_p50} ms → "
+        f"+M4 {m4_p50} ms；otel 按出厂默认 BatchSpanProcessor + 丢弃导出器口径：请求路径真实、span 即弃无保留，不含网络）",
         f"- 缓存命中 p50 {s['cache_hit']['latency_ms_p50']} ms vs miss {s['cache_miss']['latency_ms_p50']} ms"
         "（零延迟 mock 上游下差异很小；真实上游秒级延迟时缓存收益为秒级）",
         f"- 强制故障转移 p50 {s['failover_forced']['latency_ms_p50']} ms（含 10ms 重试退避）；"
@@ -371,31 +440,58 @@ def render_markdown(results: dict) -> str:
     ]
 
     lines += [
-        "", "## 流式（SSE）", "",
+        "",
+        "## 流式（SSE）",
+        "",
         "| 场景 | TTFT 平均 (ms) | TTFT p95 (ms) | 总时延平均 (ms) | 平均块数 |",
         "|---|---|---|---|---|",
         f"| 基线（无插件） | {s['baseline_streaming']['ttft_ms_avg']} | {s['baseline_streaming']['ttft_ms_p95']} "
         f"| {s['baseline_streaming']['total_ms_avg']} | {s['baseline_streaming']['chunks_avg']} |",
         f"| 全插件链 | {s['full_plugins_streaming']['ttft_ms_avg']} | {s['full_plugins_streaming']['ttft_ms_p95']} "
         f"| {s['full_plugins_streaming']['total_ms_avg']} | {s['full_plugins_streaming']['chunks_avg']} |",
+        f"| 全插件链 + M4 可观测 | {s['m4_full_plugins_streaming']['ttft_ms_avg']} | {s['m4_full_plugins_streaming']['ttft_ms_p95']} "
+        f"| {s['m4_full_plugins_streaming']['total_ms_avg']} | {s['m4_full_plugins_streaming']['chunks_avg']} |",
     ]
 
-    lines += ["", "## 并发扩展（基线，非流式）", "",
-              "| 并发 | RPS | p50 (ms) | p95 (ms) | p99 (ms) |", "|---|---|---|---|---|"]
+    lines += [
+        "",
+        "## 并发扩展（基线，非流式）",
+        "",
+        "| 并发 | RPS | p50 (ms) | p95 (ms) | p99 (ms) |",
+        "|---|---|---|---|---|",
+    ]
     for concurrency, r in s["concurrency_scaling"].items():
-        lines.append(f"| {concurrency} | {r['rps']} | {r['latency_ms_p50']} | {r['latency_ms_p95']} | {r['latency_ms_p99']} |")
+        lines.append(
+            f"| {concurrency} | {r['rps']} | {r['latency_ms_p50']} | {r['latency_ms_p95']} | {r['latency_ms_p99']} |"
+        )
 
     lines += ["", "## 结论", ""]
     plugin_overhead = full_p50 - base_p50
-    lines.append(f"- 网关单请求基线开销 p50 {base_p50} ms；启用全部 7 个本地插件后增加 {plugin_overhead:+.3f} ms/请求。")
-    lines.append(f"- 流式 TTFT 开销：{s['full_plugins_streaming']['ttft_ms_avg'] - s['baseline_streaming']['ttft_ms_avg']:+.3f} ms。")
-    lines.append("- 故障转移：冷却稳态与基线持平；强制每次重试+切换的开销来自配置的退避时间（10ms），网关自身开销毫秒级。")
+    lines.append(
+        f"- 网关单请求基线开销 p50 {base_p50} ms；启用全部 7 个本地插件后增加 {plugin_overhead:+.3f} ms/请求。"
+    )
+    lines.append(
+        f"- M4 可观测插件（usage-report + otel-export）在全链之上增加 "
+        f"{m4_p50 - full_p50:+.3f} ms/请求（otel 按出厂默认 BatchSpanProcessor + 丢弃导出器口径，span 即弃无保留，不含网络；"
+        f"与生产请求路径一致、不含网络；相对上一版全链 p50 增幅 "
+        f"{(m4_p50 / full_p50 - 1) * 100:+.1f}%，门槛 <10%）。"
+    )
+    lines.append(
+        f"- 流式 TTFT 开销：{s['full_plugins_streaming']['ttft_ms_avg'] - s['baseline_streaming']['ttft_ms_avg']:+.3f} ms。"
+    )
+    lines.append(
+        "- 故障转移：冷却稳态与基线持平；强制每次重试+切换的开销来自配置的退避时间（10ms），网关自身开销毫秒级。"
+    )
     lines.append("- 精确缓存命中略快于转发路径；上游为真实大模型（秒级延迟）时收益为秒级。")
-    lines.append(f"- 语义缓存命中路径 p50 {s['semantic_cache_hit']['latency_ms_p50']} ms"
-                 "（含进程内 mock embed 步骤；真实部署需另加 embed 网络往返）。")
-    lines.append(f"- webhook 审核路径 p50 {s['webhook_review_allowed']['latency_ms_p50']} ms"
-                 "（本地 stub allow。该数值主要是同进程 HTTP 客户端往返的事件循环开销——顺序纯客户端实测约 3ms/次、"
-                 "并发 8 约 16ms——插件自身网关侧开销可忽略；审核服务独立部署时另加网络往返与服务处理耗时）。")
+    lines.append(
+        f"- 语义缓存命中路径 p50 {s['semantic_cache_hit']['latency_ms_p50']} ms"
+        "（含进程内 mock embed 步骤；真实部署需另加 embed 网络往返）。"
+    )
+    lines.append(
+        f"- webhook 审核路径 p50 {s['webhook_review_allowed']['latency_ms_p50']} ms"
+        "（本地 stub allow。该数值主要是同进程 HTTP 客户端往返的事件循环开销——顺序纯客户端实测约 3ms/次、"
+        "并发 8 约 16ms——插件自身网关侧开销可忽略；审核服务独立部署时另加网络往返与服务处理耗时）。"
+    )
     lines.append("- 并发 8→64 RPS 下降源于单进程 Python GIL 与事件循环争用；生产部署可用多 worker 横向扩展。")
     return "\n".join(lines) + "\n"
 
@@ -404,9 +500,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="aigateway benchmark")
     parser.add_argument("--out", default="docs/benchmark-report.md")
     parser.add_argument("--json", default="docs/benchmark-results.json")
-    parser.add_argument(
-        "--quick", action="store_true", help="CI smoke: run scenarios at 20%% size"
-    )
+    parser.add_argument("--quick", action="store_true", help="CI smoke: run scenarios at 20%% size")
     args = parser.parse_args()
 
     results = asyncio.run(main_async(args))

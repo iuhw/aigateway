@@ -54,20 +54,47 @@ async def test_non_streaming_span_tree(tmp_path, span_exporter):
     finally:
         await app.aclose()
     spans = spans_by_name(span_exporter)
-    assert REQUEST_SPAN_CHAT in spans and UPSTREAM_SPAN_NAME in spans
-    parent, child = spans[REQUEST_SPAN_CHAT], spans[UPSTREAM_SPAN_NAME]
+    # single-attempt success: one span, dispatch numbers as attributes
+    assert REQUEST_SPAN_CHAT in spans and UPSTREAM_SPAN_NAME not in spans
+    parent = spans[REQUEST_SPAN_CHAT]
     attrs = dict(parent.attributes)
     assert parent.kind == SpanKind.SERVER
     assert attrs["gateway.model"] == "m1"
+    assert attrs["gateway.request_id"]
     assert attrs["gateway.status_code"] == 200
     assert attrs["gateway.attempts"] == 1
     assert attrs["gateway.cache_hit"] is False
     assert attrs["gateway.key"] == "anonymous"
     assert attrs["gateway.provider"] == "p1"
+    assert attrs["gateway.upstream_latency_s"] >= 0
+
+
+async def test_failover_emits_upstream_sub_span(tmp_path, span_exporter):
+    config = base_config(
+        providers={"dead": {"type": "mock", "fail_status": 500}, "p1": {"type": "mock"}},
+        models={
+            "m1": {
+                "deployments": [
+                    {"provider": "dead", "model": "x"},
+                    {"provider": "p1", "model": "m1-up"},
+                ],
+                "allowed_fails": 999999,
+            }
+        },
+        plugins={"otel-export-plugin": {"config": {"endpoint": ENDPOINT}}},
+    )
+    app = GatewayApp(write_config(tmp_path, config))
+    try:
+        assert await chat_once(app) is not None
+    finally:
+        await app.aclose()
+    spans = spans_by_name(span_exporter)
+    parent, child = spans[REQUEST_SPAN_CHAT], spans[UPSTREAM_SPAN_NAME]
+    attempts = dict(parent.attributes)["gateway.attempts"]
+    assert attempts >= 2  # dead deployment retried, then failed over to p1
     assert child.kind == SpanKind.CLIENT
     assert child.parent.span_id == parent.get_span_context().span_id
-    assert dict(child.attributes)["gateway.attempts"] == 1
-    assert dict(child.attributes)["gateway.upstream_latency_s"] >= 0
+    assert dict(child.attributes)["gateway.attempts"] == attempts
 
 
 async def test_streaming_emits_ttft_event(tmp_path, span_exporter):
