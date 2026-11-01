@@ -388,7 +388,12 @@ class GatewayApp:
                 self._release_concurrency(ctx)
                 return ctx.response  # type: ignore[return-value]
 
-            result = await self.state_dispatcher().execute_embedding(route, payload)
+            ctx.upstream_started_at = time.perf_counter()
+            try:
+                result = await self.state_dispatcher().execute_embedding(route, payload)
+            finally:
+                ctx.upstream_ended_at = time.perf_counter()
+            ctx.attempts = result.attempts
             ctx.route = result.route
             ctx.deployment = result.deployment
             ctx.latency_s = time.perf_counter() - started
@@ -424,7 +429,12 @@ class GatewayApp:
     # -- non-streaming -----------------------------------------------------------
 
     async def _chat_non_streaming(self, ctx: PluginContext, route, started: float) -> dict[str, Any]:
-        result = await self.state_dispatcher().execute(route, ctx.payload)
+        ctx.upstream_started_at = time.perf_counter()
+        try:
+            result = await self.state_dispatcher().execute(route, ctx.payload)
+        finally:
+            ctx.upstream_ended_at = time.perf_counter()
+        ctx.attempts = result.attempts
         ctx.route = result.route
         ctx.deployment = result.deployment
         ctx.latency_s = time.perf_counter() - started
@@ -463,6 +473,7 @@ class GatewayApp:
         error: GatewayError | None = None
         text_parts: list[str] = []
         try:
+            ctx.upstream_started_at = time.perf_counter()
             async for chunk in self.state_dispatcher().stream(route, ctx.payload, outcome):
                 ctx.first_token_latency_s = ctx.first_token_latency_s or outcome.first_chunk_latency_s
                 filtered = await state.plugins.run_stream_chunk(ctx, chunk)
@@ -470,6 +481,7 @@ class GatewayApp:
                     continue
                 text_parts.append(chunk_text(filtered))
                 yield _sse(filtered)
+            ctx.upstream_ended_at = time.perf_counter()
             # Settle usage and cost before end hooks so plugins (token-limit
             # reconciliation, budget billing) see the final numbers.
             if outcome.usage and not ctx.usage_reported:
@@ -493,6 +505,9 @@ class GatewayApp:
         finally:
             self._release_concurrency(ctx)
             ctx.latency_s = time.perf_counter() - started
+            if ctx.upstream_started_at is not None and ctx.upstream_ended_at is None:
+                ctx.upstream_ended_at = time.perf_counter()
+            ctx.attempts = outcome.attempts
             if outcome.route is not None:
                 ctx.route = outcome.route
                 ctx.deployment = outcome.deployment

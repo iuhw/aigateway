@@ -72,6 +72,13 @@ class PluginContext:
     cost_usd: float | None = None
     cache_hit: bool = False
     error: GatewayError | None = None
+    #: Dispatch window (perf_counter timestamps) and attempt count, filled by
+    #: the app around dispatcher execution so export plugins can build upstream
+    #: sub-spans without instrumenting the dispatcher itself. None = not
+    #: dispatched (cache hit, or rejected before dispatch).
+    attempts: int | None = None
+    upstream_started_at: float | None = None
+    upstream_ended_at: float | None = None
     #: Plugin-private scratch space, keyed by plugin name.
     state: dict[str, Any] = field(default_factory=dict)
 

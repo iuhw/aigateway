@@ -20,12 +20,18 @@ dev = [
     "ruff>=0.5",
     "fakeredis>=2.26",
     "psutil>=6.0",
+    "opentelemetry-sdk>=1.26,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.26,<2",
 ]
 redis = [
     "redis>=5.0",
 ]
 tokenizer = [
     "tiktoken>=0.7",
+]
+otel = [
+    "opentelemetry-sdk>=1.26,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.26,<2",
 ]
 
 [project.scripts]

@@ -166,3 +166,12 @@ plugins:
   #     on_unavailable: fail-open     # fail-open | fail-close (503)
   #     check: [request, response]    # streamed responses reviewed after delivery
   #     max_text_chars: 20000
+  # ---- M4 observability exports (opt-in; pip install 'aigateway[otel]') ------
+  # otel-export-plugin:
+  #   config:
+  #     endpoint: "http://otel-collector:4318/v1/traces"   # required, absolute
+  #     headers: {x-api-key: "..."}   # auth for SaaS backends if needed
+  #     timeout_s: 5.0
+  #     sample_ratio: 1.0             # 0..1 head sampling
+  #     service_name: aigateway
+  #     resource: {deployment.environment: prod}
