@@ -157,6 +157,19 @@ v0.1 现状 ──► M1 治理 ──► M2 缓存 ──► M3 安全 ──�
     跨场景机器漂移；otel 按"丢弃导出器"口径测量（保留型导出器会以 GC 压力歪曲数字）；
   - fire-and-forget 验收：导出器抛异常（Simple/Batch 两口径）请求均正常完成，shutdown
     同样安全；客户端中途断开时 span 不完整、由 SDK 丢弃（不泄漏，见 operations 边界）。
+- **实测验证**（2026-11-01，对标 M3 三件套，e2e 19/19 + 负载 4/4 SLO + soak 通过）：
+  - E2E 升至 **19 项全过**（真实 GLM-4-9B）：17 真实 OTLP 导出链路（本地 collector stub
+    收到 protobuf 并解码——18 个 chat span、模型属性正确、流式 TTFT 事件、**check-9 的
+    failover 请求出现 attempts>1 父 span + gateway.upstream CLIENT 子 span**，子 span
+    策略经真实流量验证）；18 `/admin/usage` 报表与已知请求批**精确对账**（3 请求 →
+    request_delta=3、key_delta=3、prompt_token_delta=20）；19 collector 中途宕机 →
+    3 个真实模型请求全部 200（fire-and-forget 实弹验证）；
+  - 双臂负载（全 9 插件链 + M4，otel 真实导出到本地 collector，0.3s 模拟上游、并发 32）：
+    **4/4 SLO 达标**——网关开销 p99 -12.8ms（负值=与直连臂同水平）、TTFT 开销 p50 -8.7ms、
+    两臂错误率 0%；
+  - soak 10 分钟 @300 RPS：**collector 端点全程故意宕机**（最恶劣导出条件），19177 请求
+    零错误、RSS 后半程净增 +0.3 MB、句柄斜率 +3.2/min（阈值内）——10 分钟持续导出失败
+    不泄漏、不拖垮请求路径。
 
 ### M5（v0.6）提示词工程与灰度
 

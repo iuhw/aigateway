@@ -3,46 +3,46 @@
   "concurrency": 32,
   "gateway": {
     "non_stream": {
-      "requests": 2609,
+      "requests": 2668,
       "errors": 0,
-      "rps": 86.5,
+      "rps": 88.2,
       "error_rate_pct": 0.0,
-      "latency_p50_s": 0.3723,
-      "latency_p99_s": 0.4123,
+      "latency_p50_s": 0.363,
+      "latency_p99_s": 0.4129,
       "ttft_p50_s": null,
       "ttft_p99_s": null
     },
     "stream": {
-      "requests": 743,
+      "requests": 736,
       "errors": 0,
-      "rps": 23.8,
+      "rps": 24.5,
       "error_rate_pct": 0.0,
-      "latency_p50_s": 1.3035,
-      "latency_p99_s": 1.362,
-      "ttft_p50_s": 0.3515,
-      "ttft_p99_s": 0.389
+      "latency_p50_s": 1.3061,
+      "latency_p99_s": 1.3894,
+      "ttft_p50_s": 0.3497,
+      "ttft_p99_s": 0.3924
     }
   },
   "direct": {
     "non_stream": {
-      "requests": 2502,
+      "requests": 2585,
       "errors": 0,
-      "rps": 83.3,
+      "rps": 85.5,
       "error_rate_pct": 0.0,
-      "latency_p50_s": 0.3848,
-      "latency_p99_s": 0.4215,
+      "latency_p50_s": 0.3752,
+      "latency_p99_s": 0.4257,
       "ttft_p50_s": null,
       "ttft_p99_s": null
     },
     "stream": {
-      "requests": 743,
+      "requests": 744,
       "errors": 0,
-      "rps": 23.9,
+      "rps": 24.0,
       "error_rate_pct": 0.0,
-      "latency_p50_s": 1.3187,
-      "latency_p99_s": 1.3747,
-      "ttft_p50_s": 0.361,
-      "ttft_p99_s": 0.4013
+      "latency_p50_s": 1.3181,
+      "latency_p99_s": 1.3712,
+      "ttft_p50_s": 0.3584,
+      "ttft_p99_s": 0.4046
     }
   },
   "slo_checks": {
@@ -51,7 +51,7 @@
     "ttft_overhead_p50_lt_5ms": true,
     "ttft_overhead_p99_lt_25ms": true
   },
-  "overhead_p99_s": -0.0092,
-  "ttft_overhead_p50_s": -0.0095,
-  "ttft_overhead_p99_s": -0.0123
+  "overhead_p99_s": -0.0128,
+  "ttft_overhead_p50_s": -0.0087,
+  "ttft_overhead_p99_s": -0.0122
 }

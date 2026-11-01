@@ -32,6 +32,7 @@ import uvicorn
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi import FastAPI  # noqa: E402
 from fastapi.responses import JSONResponse, StreamingResponse  # noqa: E402
@@ -160,8 +161,12 @@ async def run_arm(client: httpx.AsyncClient, args, *, stream: bool, path: str) -
 
 
 async def main_async(args: argparse.Namespace) -> int:
+    from scripts.validate_e2e import OtlpCollector
+
+    collector = OtlpCollector(0)  # live local sink; port assigned by the OS
     gateway_app = create_app(
-        str(_write_gateway_config(args.upstream_latency_s)), config_watcher=False
+        str(_write_gateway_config(args.upstream_latency_s, f"http://127.0.0.1:{collector.port}/v1/traces")),
+        config_watcher=False,
     )
     direct_app = build_direct_app(args.upstream_latency_s)
 
@@ -187,6 +192,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     "stream": await run_arm(direct_client, args, stream=True, path="/stream"),
                 },
             }
+    collector.stop()
 
     gw_ns = results["gateway"]["non_stream"]
     dir_ns = results["direct"]["non_stream"]
@@ -222,7 +228,8 @@ async def main_async(args: argparse.Namespace) -> int:
         "- 方法：网关臂与直连臂（同一 mock 上游、无网关逻辑）在相同真实 HTTP 环境下对测，",
         "  网关开销 = 两臂延迟差，抵消客户端/事件循环/时钟噪声。",
         "- 网关臂启用全部 7 个本地插件（auth/keyword/cache/rate-limit/log/pii-redaction/"
-        "prompt-guard）；webhook-review 为网络型插件，同基准口径单列（见基准报告场景 9）。",
+        "prompt-guard）+ M4 可观测插件（usage-report + otel-export，**真实导出到本地 stub "
+        "collector**）；webhook-review 为网络型插件，同基准口径单列（见基准报告场景 9）。",
         "",
         "## 非流式",
         f"- 网关：{gw_ns['rps']} RPS，错误率 {gw_ns['error_rate_pct']}%，p50/p99 {_ms(gw_ns['latency_p50_s'])} / {_ms(gw_ns['latency_p99_s'])}",
@@ -258,13 +265,16 @@ def _body(i: int) -> dict:
     return {"model": "m", "messages": [{"role": "user", "content": f"load {i}"}]}
 
 
-def _write_gateway_config(latency_s: float) -> str:
+def _write_gateway_config(latency_s: float, otel_endpoint: str) -> str:
     import tempfile
 
     # Full LOCAL plugin chain (matches benchmarks/bench_gateway.py
-    # all_plugins_config). webhook-review is excluded for the same reason as in
-    # the benchmark: it is network-bound (one HTTP roundtrip per request) and
-    # measured separately there (scenario 9), not against the local-overhead SLO.
+    # all_plugins_config + the M4 observability plugins). webhook-review is
+    # excluded for the same reason as in the benchmark: it is network-bound
+    # (one HTTP roundtrip per request) and measured separately there
+    # (scenario 9), not against the local-overhead SLO. The OTLP exporter
+    # ships to a live local collector stub — the normal-path export cost is
+    # part of what's being measured.
     config = {
         "providers": {"real": {"type": "mock", "latency_s": latency_s}},
         "models": {
@@ -284,6 +294,10 @@ def _write_gateway_config(latency_s: float) -> str:
                 "config": {"groups": ["phone", "email", "id_card", "bank_card"]}
             },
             "prompt-guard-plugin": {"config": {"action": "flag"}},
+            "usage-report-plugin": {"config": {}},
+            "otel-export-plugin": {
+                "config": {"endpoint": otel_endpoint, "timeout_s": 2.0}
+            },
         },
     }
     tmp = Path(tempfile.mkdtemp(prefix="aigw-load-")) / "gateway.yaml"

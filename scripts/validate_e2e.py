@@ -24,10 +24,14 @@ via ASGITransport but a REAL upstream Ollama server):
   14 PII mask roundtrip (phone never reaches the client)
   15 prompt-guard blocks an injection attempt (400 prompt_injection_detected)
   16 webhook-review allow path + guardrail counters in /metrics
+  17 OTLP traces received by a real HTTP collector (model/TTFT/failover spans)
+  18 /admin/usage report reconciles with the requests just served
+  19 collector down -> requests keep succeeding (fire-and-forget export)
 
 The webhook-review check needs a review service: this script starts a tiny
 local allow-stub on 127.0.0.1:11439 (matching gateway.ollama.yaml) for the
-whole run.
+whole run. Checks 17-19 need a trace sink: the script also starts a minimal
+OTLP/HTTP collector stub on 127.0.0.1:11440 and shuts it down for check 19.
 """
 
 from __future__ import annotations
@@ -36,10 +40,13 @@ import argparse
 import asyncio
 import json
 import sys
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import httpx
+from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -313,7 +320,133 @@ async def check_16_webhook_review(client: httpx.AsyncClient) -> None:
     )
 
 
+async def check_17_otlp_traces(collector: OtlpCollector) -> None:
+    """A real HTTP collector receives decodable protobuf spans covering the
+    traffic this run produced: plain chat spans, a streaming TTFT, and the
+    check-9 failover (attempts > 1 with a gateway.upstream child span)."""
+    # Poll until the full evidence set has been flushed (batches go out every
+    # 5s; real-model latency spreads the requests over minutes).
+    for _ in range(60):
+        spans = collector.spans()
+        chats = [s for s in spans if s.name == "gateway.chat"]
+        with_model = [s for s in chats if _span_attr(s, "gateway.model") == "glm4:9b"]
+        with_ttft = [s for s in chats if _span_attr(s, "gateway.ttft_s") is not None]
+        failover = [s for s in chats if (_span_attr(s, "gateway.attempts") or 0) > 1]
+        upstream = [s for s in spans if s.name == "gateway.upstream"]
+        if with_model and with_ttft and failover and upstream:
+            break
+        await asyncio.sleep(0.5)
+    ok = bool(with_model) and bool(with_ttft) and bool(failover) and bool(upstream)
+    record(
+        "17 OTLP traces received",
+        ok,
+        f"exports={len(collector.received)} spans={len(spans)} chats={len(chats)} "
+        f"model_ok={bool(with_model)} with_ttft={len(with_ttft)} "
+        f"failover_spans={len(failover)} upstream_children={len(upstream)}",
+    )
+
+
+async def check_18_usage_report(client: httpx.AsyncClient) -> None:
+    """/admin/usage report section reconciles exactly with a known batch of
+    requests served between two reads (2 non-stream + 1 stream)."""
+    admin = {"Authorization": "Bearer sk-e2e-demo-key"}
+    before = (await client.get("/admin/usage", headers=admin)).json()["report"]
+    responses = [
+        await chat(client, "glm4:9b", "只回复数字1"),
+        await chat(client, "glm4:9b", "只回复数字2"),
+        await chat(client, "glm4:9b", "只回复数字3", stream=True),
+    ]
+    after = (await client.get("/admin/usage", headers=admin)).json()["report"]
+    request_delta = after["totals"]["requests"] - before["totals"]["requests"]
+    key_delta = after["by_key"].get("e2e-tester", {}).get("requests", 0) - before["by_key"].get(
+        "e2e-tester", {}
+    ).get("requests", 0)
+    token_delta = after["totals"]["prompt_tokens"] - before["totals"]["prompt_tokens"]
+    all_ok = all(r.status_code == 200 for r in responses)
+    ok = all_ok and request_delta == 3 and key_delta == 3 and token_delta > 0
+    record(
+        "18 usage report reconciles",
+        ok,
+        f"statuses={[r.status_code for r in responses]} request_delta={request_delta} "
+        f"key_delta={key_delta} prompt_token_delta={token_delta} "
+        f"bucket={after['window']['bucket']}",
+    )
+
+
+async def check_19_collector_down(client: httpx.AsyncClient, collector: OtlpCollector) -> None:
+    """Sink goes away mid-run: exports fail in the background, the request
+    path keeps serving 200s — availability is never gated on telemetry."""
+    collector.stop()
+    statuses = [
+        (await chat(client, "glm4:9b", prompt)).status_code
+        for prompt in ("回复ok", "回复好", "回复是")
+    ]
+    record(
+        "19 collector down -> requests unaffected",
+        all(status == 200 for status in statuses),
+        f"statuses={statuses} (collector stopped before these requests)",
+    )
+
+
 REVIEW_STUB_PORT = 11439
+OTLP_STUB_PORT = 11440
+
+
+class OtlpCollector:
+    """Minimal OTLP/HTTP collector stub (stdlib HTTP server on a daemon thread)
+    that decodes protobuf exports into `received`; the trace sink for checks
+    17-19. stop() takes it down so check 19 can fire requests at a dead sink."""
+
+    def __init__(self, port: int):
+        self.received: list[ExportTraceServiceRequest] = []
+        collector = self
+        class Handler(BaseHTTPRequestHandler):
+            # HTTP/1.1 keep-alive: the OTLP exporter pools connections; a
+            # per-request-close HTTP/1.0 server makes every post-first export
+            # race the socket teardown and time out.
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self) -> None:  # noqa: N802 - stdlib naming
+                length = int(self.headers.get("content-length", "0"))
+                body = self.rfile.read(length)
+                try:
+                    collector.received.append(ExportTraceServiceRequest.FromString(body))
+                except Exception:  # noqa: BLE001 - malformed export: count as received-but-bad
+                    pass
+                self.send_response(200)
+                self.send_header("content-length", "0")
+                self.end_headers()
+
+            def log_message(self, *args) -> None:  # silence request logging
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    @property
+    def port(self) -> int:
+        return self._server.server_port
+
+    def stop(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+    def spans(self) -> list:
+        return [
+            span
+            for export in self.received
+            for resource in export.resource_spans
+            for scope in resource.scope_spans
+            for span in scope.spans
+        ]
+
+
+def _span_attr(span, key: str):
+    for attribute in span.attributes:
+        if attribute.key == key:
+            which = attribute.value.WhichOneof("value")
+            return getattr(attribute.value, which) if which else None
+    return None
 
 
 async def start_review_stub() -> asyncio.AbstractServer:
@@ -347,6 +480,7 @@ async def start_review_stub() -> asyncio.AbstractServer:
 
 async def main_async(config_path: str, report_path: str) -> int:
     review_stub = await start_review_stub()
+    collector = OtlpCollector(OTLP_STUB_PORT)
     app = create_app(config_path, config_watcher=False)
     checks = [
         check_1_models, check_2_non_stream, check_3_stream, check_4_auth,
@@ -354,6 +488,9 @@ async def main_async(config_path: str, report_path: str) -> int:
         check_8_rate_limit, check_9_failover, check_10_metrics, check_11_concurrency,
         check_12_anthropic_non_stream, check_13_anthropic_stream,
         check_14_pii_mask, check_15_prompt_guard_block, check_16_webhook_review,
+        lambda client: check_17_otlp_traces(collector),
+        check_18_usage_report,
+        lambda client: check_19_collector_down(client, collector),
     ]
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://e2e") as client:

@@ -97,3 +97,12 @@ plugins:
       url: "http://127.0.0.1:11439/review"
       timeout_s: 2.0
       check: [request]
+  # ---- M4 observability (validated by checks 17-19 in validate_e2e.py) --------
+  otel-export-plugin:
+    # validate_e2e.py starts a local OTLP/HTTP collector stub on this port.
+    config:
+      endpoint: "http://127.0.0.1:11440/v1/traces"
+      timeout_s: 2.0
+  usage-report-plugin:
+    config:
+      retention_hours: 24

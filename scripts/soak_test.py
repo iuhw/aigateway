@@ -107,7 +107,9 @@ async def main_async(args: argparse.Namespace) -> int:
         "",
         f"- 时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
         f"- 时长：{elapsed_total / 60:.1f} 分钟 @ {args.rps} RPS（共 {total} 请求，错误 {errors}）",
-        "- 插件链：全部 7 个本地插件（auth/keyword/cache/rate-limit/log/pii-redaction/prompt-guard）",
+        "- 插件链：全部 7 个本地插件（auth/keyword/cache/rate-limit/log/pii-redaction/prompt-guard）"
+        "+ M4 可观测插件（usage-report + otel-export，**collector 端点故意永久宕机**：全程导出失败，"
+        "验证 fire-and-forget 不泄漏、不拖垮请求路径）",
         f"- RSS：起始 {samples[0][1]:.1f} MB → 结束 {samples[-1][1]:.1f} MB"
         f"（斜率 {rss_slope:+.3f} MB/min，后半程净增 {rss_growth_total:+.1f} MB）",
         f"- 句柄：斜率 {handle_slope:+.2f} /min" if handle_samples else "- 句柄：psutil 不可用",
@@ -179,6 +181,10 @@ def main() -> None:
             # Full LOCAL plugin chain (matches benchmarks/bench_gateway.py): the
             # soak exercises plugin-chain state (buffers, cache entries, log
             # hooks) for leak detection, not just the bare routing path.
+            # M4 adds the observability exporters with the collector endpoint
+            # PERMANENTLY DEAD (port 1): the soak doubles as a durability run
+            # for fire-and-forget export — ten minutes of failing exports must
+            # not leak, stall, or error a single request.
             "plugins": {
                 "auth-plugin": {"config": {"allow_anonymous": True}},
                 "keyword-filter-plugin": {"config": {"words": ["敏感词", "forbidden"], "mode": "block"}},
@@ -189,6 +195,10 @@ def main() -> None:
                     "config": {"groups": ["phone", "email", "id_card", "bank_card"]}
                 },
                 "prompt-guard-plugin": {"config": {"action": "flag"}},
+                "usage-report-plugin": {"config": {}},
+                "otel-export-plugin": {
+                    "config": {"endpoint": "http://127.0.0.1:1/v1/traces", "timeout_s": 2.0}
+                },
             },
         }
         tmp = Path(tempfile.mkdtemp(prefix="aigw-soak-")) / "gateway.yaml"
