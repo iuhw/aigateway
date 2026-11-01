@@ -95,6 +95,38 @@
       "targets": [
         { "expr": "sum(rate(gateway_plugin_rejections_total[5m])) by (plugin)", "legendFormat": "{{plugin}}" }
       ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Cost by virtual key (USD/s) — M4",
+      "gridPos": { "x": 0, "y": 28, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum by (key) (rate(gateway_key_cost_usd_total[$__rate_interval]))", "legendFormat": "{{key}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Guardrail verdicts by plugin — M4",
+      "gridPos": { "x": 12, "y": 28, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum by (plugin, verdict) (rate(gateway_guardrail_flags_total[$__rate_interval]))", "legendFormat": "{{plugin}} {{verdict}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Cost by model (USD/s) — M4",
+      "gridPos": { "x": 0, "y": 36, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum by (model) (rate(gateway_cost_usd_total[$__rate_interval]))", "legendFormat": "{{model}}" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Semantic cache hits (/min) — M4",
+      "gridPos": { "x": 12, "y": 36, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum(increase(gateway_semantic_cache_hits_total[1m]))", "legendFormat": "semantic hits" }
+      ]
     }
   ]
 }

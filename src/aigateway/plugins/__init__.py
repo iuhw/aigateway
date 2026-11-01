@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from aigateway.plugins.auth import AuthPlugin
 from aigateway.plugins.keyword_filter import KeywordFilterPlugin
+from aigateway.plugins.langfuse_export import LangfuseExportPlugin
 from aigateway.plugins.otel_export import OtelExportPlugin
 from aigateway.plugins.pii_redaction import PiiRedactionPlugin
 from aigateway.plugins.prompt_guard import PromptGuardPlugin
@@ -17,6 +18,7 @@ from aigateway.plugins.webhook_review import WebhookReviewPlugin
 __all__ = [
     "AuthPlugin",
     "KeywordFilterPlugin",
+    "LangfuseExportPlugin",
     "OtelExportPlugin",
     "PiiRedactionPlugin",
     "PromptGuardPlugin",

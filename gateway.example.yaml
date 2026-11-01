@@ -180,3 +180,9 @@ plugins:
   #     sample_ratio: 1.0             # 0..1 head sampling
   #     service_name: aigateway
   #     resource: {deployment.environment: prod}
+  # langfuse-export-plugin:         # same OTLP machinery, Langfuse preset
+  #   config:
+  #     host: "https://cloud.langfuse.com"   # or self-hosted http://langfuse:3000
+  #     public_key: "pk-lf-..."
+  #     secret_key: "sk-lf-..."
+  #     sample_ratio: 1.0
