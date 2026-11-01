@@ -44,9 +44,7 @@ def create_app(config_path: str, *, config_watcher: bool = True) -> FastAPI:
     app.state.gateway = gateway
 
     if not (gateway.state.config.section("server") or {}).get("admin_api_key"):
-        logger.warning(
-            "server.admin_api_key is not set: /metrics and /admin/* are UNPROTECTED (dev mode)"
-        )
+        logger.warning("server.admin_api_key is not set: /metrics and /admin/* are UNPROTECTED (dev mode)")
 
     @app.exception_handler(GatewayError)
     async def _gateway_error_handler(_request: Request, exc: GatewayError) -> JSONResponse:
@@ -284,13 +282,37 @@ def create_app(config_path: str, *, config_watcher: bool = True) -> FastAPI:
         await plugin.delete_dynamic_key(name)
         return {"deleted": name}
 
+    def _usage_report_plugin():
+        from aigateway.plugins.usage_report import UsageReportPlugin
+
+        for plugin in gateway.state.plugins.plugins:
+            if isinstance(plugin, UsageReportPlugin):
+                return plugin
+        return None
+
     @app.get("/admin/usage")
-    async def admin_usage(request: Request, key: str | None = None) -> dict[str, Any]:
-        """Per-key current-window budget spend and token-quota usage."""
+    async def admin_usage(
+        request: Request,
+        key: str | None = None,
+        model: str | None = None,
+        hours: int = 24,
+        bucket: str = "hour",
+    ) -> dict[str, Any]:
+        """Per-key budget snapshot (auth plugin) plus a key/model/time usage
+        report (usage-report plugin), whichever is configured. Query params:
+        ``key``, ``model``, ``hours`` (lookback), ``bucket`` (hour|day)."""
         _require_admin(request)
-        plugin = _auth_plugin()
-        if plugin is None:
-            raise NotFoundError("auth plugin is not configured")
-        return await plugin.usage_snapshot(name_filter=key)
+        out: dict[str, Any] = {}
+        auth = _auth_plugin()
+        if auth is not None:
+            out.update(await auth.usage_snapshot(name_filter=key))
+        report = _usage_report_plugin()
+        if report is not None:
+            if bucket not in ("hour", "day"):
+                raise BadRequestError("bucket must be 'hour' or 'day'")
+            out["report"] = report.usage_report(key=key, model=model, hours=hours, bucket=bucket)
+        if not out:
+            raise NotFoundError("auth and usage-report plugins are not configured")
+        return out
 
     return app

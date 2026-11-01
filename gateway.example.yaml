@@ -143,6 +143,11 @@ plugins:
       stdout: false
       log_prompt: false
       log_response: false
+  # ---- M4 usage reports (/admin/usage "report" section; per-replica view) ----
+  usage-report-plugin:
+    config:
+      max_records: 50000            # ring size (oldest dropped first)
+      retention_hours: 24           # lookback window served by /admin/usage
   # ---- M3 safety guardrails (all opt-in; delete the block to disable) --------
   # pii-redaction-plugin:
   #   config:

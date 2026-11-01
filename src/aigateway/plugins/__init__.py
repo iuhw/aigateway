@@ -11,6 +11,7 @@ from aigateway.plugins.rate_limit import RateLimitPlugin
 from aigateway.plugins.request_log import RequestLogPlugin
 from aigateway.plugins.response_cache import ResponseCachePlugin
 from aigateway.plugins.semantic_cache import SemanticCachePlugin
+from aigateway.plugins.usage_report import UsageReportPlugin
 from aigateway.plugins.webhook_review import WebhookReviewPlugin
 
 __all__ = [
@@ -23,5 +24,6 @@ __all__ = [
     "RequestLogPlugin",
     "ResponseCachePlugin",
     "SemanticCachePlugin",
+    "UsageReportPlugin",
     "WebhookReviewPlugin",
 ]
