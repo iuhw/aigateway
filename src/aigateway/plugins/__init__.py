@@ -8,6 +8,7 @@ from aigateway.plugins.langfuse_export import LangfuseExportPlugin
 from aigateway.plugins.otel_export import OtelExportPlugin
 from aigateway.plugins.pii_redaction import PiiRedactionPlugin
 from aigateway.plugins.prompt_guard import PromptGuardPlugin
+from aigateway.plugins.prompt_template import PromptTemplatePlugin
 from aigateway.plugins.rate_limit import RateLimitPlugin
 from aigateway.plugins.request_log import RequestLogPlugin
 from aigateway.plugins.response_cache import ResponseCachePlugin
@@ -22,6 +23,7 @@ __all__ = [
     "OtelExportPlugin",
     "PiiRedactionPlugin",
     "PromptGuardPlugin",
+    "PromptTemplatePlugin",
     "RateLimitPlugin",
     "RequestLogPlugin",
     "ResponseCachePlugin",
