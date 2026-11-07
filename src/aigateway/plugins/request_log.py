@@ -18,7 +18,10 @@ def build_logger(path: str | None, max_bytes: int, backup_count: int) -> logging
     logger = logging.getLogger("aigateway.request_log")
     logger.setLevel(logging.INFO)
     logger.propagate = False
-    if path and not logger.handlers:
+    # Attach only when WE haven't attached before: foreign handlers on this
+    # named logger (pytest's capture, framework handlers) must not suppress
+    # file logging — hence a marker attribute instead of `not logger.handlers`.
+    if path and not getattr(logger, "_aigateway_file_handler", None):
         try:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             handler: logging.Handler = logging.handlers.RotatingFileHandler(
@@ -31,6 +34,7 @@ def build_logger(path: str | None, max_bytes: int, backup_count: int) -> logging
             return logger
         handler.setFormatter(logging.Formatter("%(message)s"))
         logger.addHandler(handler)
+        logger._aigateway_file_handler = handler  # type: ignore[attr-defined]
     return logger
 
 
@@ -56,6 +60,15 @@ class RequestLogPlugin(Plugin):
         )
         self.to_stdout = bool(self.config.get("stdout", False))
         self._t0 = time.perf_counter()
+
+    async def aclose(self) -> None:
+        """Detach and close our file handler (hot-reload / shutdown must not
+        leave an open handle writing to a replaced destination)."""
+        handler = getattr(self.logger, "_aigateway_file_handler", None)
+        if handler is not None:
+            self.logger._aigateway_file_handler = None  # type: ignore[attr-defined]
+            self.logger.removeHandler(handler)
+            handler.close()
 
     def _truncate(self, text: str) -> str:
         if len(text) > self.max_body_chars:

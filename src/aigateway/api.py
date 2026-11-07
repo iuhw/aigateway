@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import ValidationError
 
+import aigateway
 from aigateway.app import GatewayApp
 from aigateway.errors import (
     AuthenticationError,
@@ -40,7 +41,9 @@ def create_app(config_path: str, *, config_watcher: bool = True) -> FastAPI:
         yield
         await gateway.aclose()
 
-    app = FastAPI(title="aigateway", version="0.5.0", docs_url="/docs", redoc_url=None, lifespan=lifespan)
+    app = FastAPI(
+        title="aigateway", version=aigateway.__version__, docs_url="/docs", redoc_url=None, lifespan=lifespan
+    )
     app.state.gateway = gateway
 
     if not (gateway.state.config.section("server") or {}).get("admin_api_key"):
@@ -185,7 +188,13 @@ def create_app(config_path: str, *, config_watcher: bool = True) -> FastAPI:
         return JSONResponse(status_code=200, content=result)
 
     @app.get("/v1/models")
-    async def list_models() -> dict[str, Any]:
+    async def list_models(request: Request) -> dict[str, Any]:
+        """OpenAI-compatible model listing. When an auth plugin is configured
+        it requires a valid virtual key (same as the OpenAI API) — unauthenticated
+        model enumeration is closed; without an auth plugin it stays open."""
+        auth = _auth_plugin()
+        if auth is not None:
+            await auth.authenticate_request(dict(request.headers))
         return {
             "object": "list",
             "data": [

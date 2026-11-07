@@ -187,6 +187,10 @@ class AuthPlugin(Plugin):
             digest = raw[7:].lower()
         else:
             digest = _key_hash(raw)
+        # Digest-only in memory: the raw material is dropped after hashing so
+        # record dumps / tracebacks can never leak it. sha256:-form entries
+        # never carried plaintext to begin with.
+        record.pop("key", None)
         record["_hash"] = digest
         record["budgets"] = _normalize_budgets(record.get("budgets"))
         record["token_quota"] = _normalize_token_quota(record.get("token_quota"))
@@ -288,11 +292,16 @@ class AuthPlugin(Plugin):
 
     # -- enforcement ----------------------------------------------------------------
 
-    async def on_request(self, ctx: PluginContext) -> None:
+    async def authenticate_request(self, headers: dict[str, str]) -> dict[str, Any]:
+        """Authenticate headers: static config lookup first, dynamic overlay
+        fallback. Raises AuthenticationError on failure."""
         try:
-            identity = self.authenticate(ctx.headers)
+            return self.authenticate(headers)
         except AuthenticationError:
-            identity = await self._authenticate_dynamic(ctx.headers)
+            return await self._authenticate_dynamic(headers)
+
+    async def on_request(self, ctx: PluginContext) -> None:
+        identity = await self.authenticate_request(ctx.headers)
         if identity.get("expires_at") is not None:
             expires = _parse_expires_at(identity["expires_at"])
             if expires is not None and datetime.now(UTC) >= expires:
