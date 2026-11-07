@@ -86,6 +86,37 @@ def m4_plugins_config() -> dict:
     }
 
 
+def m5_plugins_config() -> dict:
+    """M4 chain + the M5 prompt-template plugin (one matching rule with
+    variables rendered per request)."""
+    return {
+        **m4_plugins_config(),
+        "prompt-template-plugin": {
+            "config": {
+                "templates": [
+                    {
+                        "system": "You are the {product} assistant serving {model} for key {key}.",
+                        "variables": {"product": "ACME"},
+                    }
+                ]
+            }
+        },
+    }
+
+
+def m5_models_config() -> dict:
+    """Models with a canary rule: 10% of `bench` traffic diverts to the
+    identical `bench-canary` route (canary resolution cost only)."""
+    return {
+        "bench": {
+            "deployments": [{"provider": "fast", "model": "bench-up"}],
+            "retries": 1,
+            "canary": {"target": "bench-canary", "percent": 10},
+        },
+        "bench-canary": {"deployments": [{"provider": "fast", "model": "bench-up"}], "retries": 1},
+    }
+
+
 def install_bench_otel_processor() -> None:
     """Swap the OTLP exporter for a discarding one while keeping the default
     BatchSpanProcessor. The request path (span build + bounded enqueue) is
@@ -257,6 +288,13 @@ async def main_async(args: argparse.Namespace) -> dict:
     scenarios["m4_full_plugins_nonstream"] = await run_latency(client, payload, int(1000 * q), 8)
     await close_client(client)
 
+    # ---- 2b. M5: prompt-template + canary on top of the M4 chain -------------
+    # Also back-to-back with the M4 window (same machine-drift rationale).
+    client, _tmp = make_client(base_config(plugins=m5_plugins_config(), extra_models=m5_models_config()))
+    await run_latency(client, payload, 50, 8)
+    scenarios["m5_full_plugins_nonstream"] = await run_latency(client, payload, int(1000 * q), 8)
+    await close_client(client)
+
     # ---- 3. streaming --------------------------------------------------------
     client, _tmp = make_client(base_config())
     scenarios["baseline_streaming"] = await run_streaming(client, int(300 * q))
@@ -268,6 +306,10 @@ async def main_async(args: argparse.Namespace) -> dict:
 
     client, _tmp = make_client(base_config(plugins=m4_plugins_config()))
     scenarios["m4_full_plugins_streaming"] = await run_streaming(client, int(300 * q))
+    await close_client(client)
+
+    client, _tmp = make_client(base_config(plugins=m5_plugins_config(), extra_models=m5_models_config()))
+    scenarios["m5_full_plugins_streaming"] = await run_streaming(client, int(300 * q))
     await close_client(client)
 
     # ---- 4. cache hit vs miss -------------------------------------------------
@@ -421,16 +463,20 @@ def render_markdown(results: dict) -> str:
         row("semantic_cache_hit", "语义缓存 hit（含 mock embed）"),
         row("webhook_review_allowed", "webhook 审核（本地 stub，每请求 1 次往返）"),
         row("m4_full_plugins_nonstream", "全插件链 + M4 可观测（usage-report + otel Batch+丢弃导出）"),
+        row("m5_full_plugins_nonstream", "全插件链 + M4 + M5（prompt-template 注入 + canary 切流）"),
     ]
 
     base_p50 = s["baseline_nonstream"]["latency_ms_p50"]
     full_p50 = s["full_plugins_nonstream"]["latency_ms_p50"]
     m4_p50 = s["m4_full_plugins_nonstream"]["latency_ms_p50"]
+    m5_p50 = s["m5_full_plugins_nonstream"]["latency_ms_p50"]
     lines += [
         "",
         f"- 插件链开销：p50 {full_p50 - base_p50:+.3f} ms（基线 {base_p50} ms → 全插件 {full_p50} ms）",
         f"- M4 可观测插件开销：p50 {m4_p50 - full_p50:+.3f} ms（全插件 {full_p50} ms → "
         f"+M4 {m4_p50} ms；otel 按出厂默认 BatchSpanProcessor + 丢弃导出器口径：请求路径真实、span 即弃无保留，不含网络）",
+        f"- M5 开销：p50 {m5_p50 - m4_p50:+.3f} ms（+M4 {m4_p50} ms → +M5 {m5_p50} ms；"
+        f"prompt-template 每请求规则匹配+变量渲染，canary 每请求一次身份哈希分流）",
         f"- 缓存命中 p50 {s['cache_hit']['latency_ms_p50']} ms vs miss {s['cache_miss']['latency_ms_p50']} ms"
         "（零延迟 mock 上游下差异很小；真实上游秒级延迟时缓存收益为秒级）",
         f"- 强制故障转移 p50 {s['failover_forced']['latency_ms_p50']} ms（含 10ms 重试退避）；"
@@ -451,6 +497,8 @@ def render_markdown(results: dict) -> str:
         f"| {s['full_plugins_streaming']['total_ms_avg']} | {s['full_plugins_streaming']['chunks_avg']} |",
         f"| 全插件链 + M4 可观测 | {s['m4_full_plugins_streaming']['ttft_ms_avg']} | {s['m4_full_plugins_streaming']['ttft_ms_p95']} "
         f"| {s['m4_full_plugins_streaming']['total_ms_avg']} | {s['m4_full_plugins_streaming']['chunks_avg']} |",
+        f"| 全插件链 + M4 + M5 | {s['m5_full_plugins_streaming']['ttft_ms_avg']} | {s['m5_full_plugins_streaming']['ttft_ms_p95']} "
+        f"| {s['m5_full_plugins_streaming']['total_ms_avg']} | {s['m5_full_plugins_streaming']['chunks_avg']} |",
     ]
 
     lines += [
@@ -475,6 +523,10 @@ def render_markdown(results: dict) -> str:
         f"{m4_p50 - full_p50:+.3f} ms/请求（otel 按出厂默认 BatchSpanProcessor + 丢弃导出器口径，span 即弃无保留，不含网络；"
         f"与生产请求路径一致、不含网络；相对上一版全链 p50 增幅 "
         f"{(m4_p50 / full_p50 - 1) * 100:+.1f}%，门槛 <10%）。"
+    )
+    lines.append(
+        f"- M5（prompt-template 注入 + canary 切流）在 M4 全链之上增加 {m5_p50 - m4_p50:+.3f} ms/请求"
+        f"（相对 M4 全链 p50 增幅 {(m5_p50 / m4_p50 - 1) * 100:+.1f}%，门槛 <10%）。"
     )
     lines.append(
         f"- 流式 TTFT 开销：{s['full_plugins_streaming']['ttft_ms_avg'] - s['baseline_streaming']['ttft_ms_avg']:+.3f} ms。"

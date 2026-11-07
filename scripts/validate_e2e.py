@@ -27,11 +27,17 @@ via ASGITransport but a REAL upstream Ollama server):
   17 OTLP traces received by a real HTTP collector (model/TTFT/failover spans)
   18 /admin/usage report reconciles with the requests just served
   19 collector down -> requests keep succeeding (fire-and-forget export)
+  20 prompt-template injection: gateway system prompt (with {key} variable)
+     steers the real model's reply format
+  21 canary split: forced identity lands on the canary route (served model
+     name + gateway_canary_requests_total), others stay stable
 
 The webhook-review check needs a review service: this script starts a tiny
 local allow-stub on 127.0.0.1:11439 (matching gateway.ollama.yaml) for the
 whole run. Checks 17-19 need a trace sink: the script also starts a minimal
 OTLP/HTTP collector stub on 127.0.0.1:11440 and shuts it down for check 19.
+Checks 20-21 need the prompt-template/canary config in gateway.ollama.yaml
+and the `glm4:9b-canary` ollama tag (ollama cp glm4:9b glm4:9b-canary).
 """
 
 from __future__ import annotations
@@ -388,6 +394,60 @@ async def check_19_collector_down(client: httpx.AsyncClient, collector: OtlpColl
     )
 
 
+async def check_20_prompt_template(client: httpx.AsyncClient) -> None:
+    """M5: the gateway-owned system prompt (with the {key} variable rendered
+    from the virtual-key identity) steers the real model's reply format."""
+    response = await chat(client, "glm4:9b", "请按照系统提示的规则回复我：回复一个字：好")
+    if response.status_code != 200:
+        record("20 prompt template injection", False, f"status={response.status_code} body={response.text[:150]}")
+        return
+    content = response.json()["choices"][0]["message"]["content"]
+    has_token = "[[E2E-M5-e2e-tester]]" in content
+    not_literal = "{key}" not in content  # substitution actually happened
+    record(
+        "20 prompt template injection",
+        has_token and not_literal,
+        f"reply={content[-60:]!r} token={has_token} unsubstituted={not not_literal}",
+    )
+
+
+async def check_21_canary_split(client: httpx.AsyncClient) -> None:
+    """M5: the `e2e-canary` virtual key is forced onto the glm4-canary route
+    (distinct upstream tag -> served model name proves the diversion); the
+    default key stays stable. Branch decisions are counted in /metrics."""
+    stable = await chat(client, "glm4:9b", "回答ok")
+    diverted = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer sk-e2e-canary-key"},
+        json={"model": "glm4:9b", "messages": [{"role": "user", "content": "回答好"}]},
+        timeout=320,
+    )
+    if stable.status_code != 200 or diverted.status_code != 200:
+        record(
+            "21 canary split by identity",
+            False,
+            f"stable={stable.status_code} diverted={diverted.status_code} bodies={stable.text[:80]}|{diverted.text[:80]}",
+        )
+        return
+    served_stable = stable.json().get("model")
+    served_canary = diverted.json().get("model")
+    metrics_text = (await client.get("/metrics", headers={"Authorization": "Bearer sk-e2e-demo-key"})).text
+    # prometheus_client sorts label names alphabetically in the exposition
+    # format — match on label pairs, not the exact serialized order.
+    canary_lines = [
+        line for line in metrics_text.splitlines() if line.startswith("gateway_canary_requests_total{")
+    ]
+    canary_counted = any('model="glm4:9b"' in line and 'branch="canary"' in line for line in canary_lines)
+    stable_counted = any('model="glm4:9b"' in line and 'branch="stable"' in line for line in canary_lines)
+    ok = served_stable == "glm4:9b" and served_canary == "glm4:9b-canary" and canary_counted and stable_counted
+    record(
+        "21 canary split by identity",
+        ok,
+        f"stable-served={served_stable} canary-served={served_canary} "
+        f"metrics(canary)={canary_counted} metrics(stable)={stable_counted}",
+    )
+
+
 REVIEW_STUB_PORT = 11439
 OTLP_STUB_PORT = 11440
 
@@ -491,6 +551,8 @@ async def main_async(config_path: str, report_path: str) -> int:
         lambda client: check_17_otlp_traces(collector),
         check_18_usage_report,
         lambda client: check_19_collector_down(client, collector),
+        check_20_prompt_template,
+        check_21_canary_split,
     ]
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://e2e") as client:

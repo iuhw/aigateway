@@ -19,6 +19,12 @@ models:
     deployments:
       - provider: ollama
         model: glm4:9b
+    canary:
+      # M5 (check 21): only the `e2e-canary` virtual key is diverted to the
+      # glm4-canary route; every other key stays stable (percent 0).
+      target: glm4-canary
+      percent: 0
+      keys: [e2e-canary]
     policy:
       timeout_s: 300        # first inference loads the model into VRAM (slow)
       retries: 1
@@ -46,6 +52,19 @@ models:
         model: glm4:9b
     policy:
       timeout_s: 300
+  glm4-canary:
+    # canary twin of glm4:9b (same weights, distinct ollama tag) so the
+    # served-model name in responses proves the diversion (check 21).
+    # Prereq: ollama cp glm4:9b glm4:9b-canary
+    deployments:
+      - provider: ollama
+        model: glm4:9b-canary
+    policy:
+      timeout_s: 300
+      retries: 1
+      retry_backoff_s: 1.0
+      cooldown_s: 60
+      allowed_fails: 3
 
 plugins:
   auth-plugin:
@@ -55,6 +74,8 @@ plugins:
       api_keys:
         - key: sk-e2e-demo-key
           name: e2e-tester
+        - key: sk-e2e-canary-key
+          name: e2e-canary
   keyword-block:
     plugin: keyword-filter-plugin
     order: 20
@@ -106,3 +127,10 @@ plugins:
   usage-report-plugin:
     config:
       retention_hours: 24
+  # ---- M5 (validated by checks 20-21 in validate_e2e.py) ----------------------
+  prompt-template-plugin:
+    # Scoped to the glm4 models so the rest of the E2E run is unaffected.
+    config:
+      templates:
+        - models: ["glm4:9b", "glm4-canary"]
+          system: "You are the aigateway E2E assistant. CRITICAL: every reply must end with the exact token [[E2E-M5-{key}]]."
