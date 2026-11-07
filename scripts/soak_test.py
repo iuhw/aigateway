@@ -107,9 +107,10 @@ async def main_async(args: argparse.Namespace) -> int:
         "",
         f"- 时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
         f"- 时长：{elapsed_total / 60:.1f} 分钟 @ {args.rps} RPS（共 {total} 请求，错误 {errors}）",
-        "- 插件链：全部 7 个本地插件（auth/keyword/cache/rate-limit/log/pii-redaction/prompt-guard）"
-        "+ M4 可观测插件（usage-report + otel-export，**collector 端点故意永久宕机**：全程导出失败，"
-        "验证 fire-and-forget 不泄漏、不拖垮请求路径）",
+        "- 插件链：全部本地插件（auth/keyword/cache/rate-limit/log/pii-redaction/prompt-guard）"
+        "+ M4 可观测插件（usage-report + otel-export）+ M5（prompt-template 模板注入 + canary 10% 切流），"
+        "**collector 端点故意永久宕机**：全程导出失败，"
+        "验证 fire-and-forget 不泄漏、不拖垮请求路径",
         f"- RSS：起始 {samples[0][1]:.1f} MB → 结束 {samples[-1][1]:.1f} MB"
         f"（斜率 {rss_slope:+.3f} MB/min，后半程净增 {rss_growth_total:+.1f} MB）",
         f"- 句柄：斜率 {handle_slope:+.2f} /min" if handle_samples else "- 句柄：psutil 不可用",
@@ -172,7 +173,11 @@ def main() -> None:
                     ],
                     "retries": 1,
                     "retry_backoff_s": 0.01,
-                }
+                    # v1.0: the canary split (10% -> identical m2 route) is part
+                    # of the soaked request path — identity hashing every request.
+                    "canary": {"target": "m2", "percent": 10},
+                },
+                "m2": {"deployments": [{"provider": "fast", "model": "m1-up"}]},
             },
             "providers": {
                 "fast": {"type": "mock", "latency_s": 0.005},
@@ -196,6 +201,18 @@ def main() -> None:
                 },
                 "prompt-guard-plugin": {"config": {"action": "flag"}},
                 "usage-report-plugin": {"config": {}},
+                # v1.0: M5 prompt-template exercises rule matching + variable
+                # rendering on every request for the whole soak window.
+                "prompt-template-plugin": {
+                    "config": {
+                        "templates": [
+                            {
+                                "system": "You are the {product} assistant serving {model} for key {key}.",
+                                "variables": {"product": "ACME"},
+                            }
+                        ]
+                    }
+                },
                 "otel-export-plugin": {
                     "config": {"endpoint": "http://127.0.0.1:1/v1/traces", "timeout_s": 2.0}
                 },

@@ -282,7 +282,11 @@ def _write_gateway_config(latency_s: float, otel_endpoint: str) -> str:
                 "deployments": [{"provider": "real", "model": "m-up"}],
                 "retries": 1,
                 "retry_backoff_s": 0.05,
-            }
+                # v1.0: canary split in the measured path (matches the soak
+                # chain) — 10% diverts to the identical m-canary route.
+                "canary": {"target": "m-canary", "percent": 10},
+            },
+            "m-canary": {"deployments": [{"provider": "real", "model": "m-up"}]},
         },
         "plugins": {
             "auth-plugin": {"config": {"allow_anonymous": True}},
@@ -295,6 +299,17 @@ def _write_gateway_config(latency_s: float, otel_endpoint: str) -> str:
             },
             "prompt-guard-plugin": {"config": {"action": "flag"}},
             "usage-report-plugin": {"config": {}},
+            # v1.0: M5 prompt-template in the measured path (matches the soak).
+            "prompt-template-plugin": {
+                "config": {
+                    "templates": [
+                        {
+                            "system": "You are the {product} assistant serving {model} for key {key}.",
+                            "variables": {"product": "ACME"},
+                        }
+                    ]
+                }
+            },
             "otel-export-plugin": {
                 "config": {"endpoint": otel_endpoint, "timeout_s": 2.0}
             },
