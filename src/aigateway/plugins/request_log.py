@@ -114,6 +114,8 @@ class RequestLogPlugin(Plugin):
         if ctx.deployment is not None:
             record["provider"] = ctx.deployment.provider
             record["upstream_model"] = ctx.deployment.model
+        if ctx.requested_model is not None:
+            record["requested_model"] = ctx.requested_model
         if self.log_response and ctx.response is not None:
             record["response"] = self._truncate(str(ctx.response))
         self._emit(record)

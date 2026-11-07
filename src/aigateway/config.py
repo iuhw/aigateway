@@ -103,6 +103,8 @@ class GatewayConfig:
     # -- routing ----------------------------------------------------------------
 
     def build_router(self) -> Router:
+        from aigateway.core.router import CanaryRule
+
         routes: dict[str, ModelRoute] = {}
         for model_name, spec in (self.data.get("models") or {}).items():
             deployments = [
@@ -125,12 +127,36 @@ class GatewayConfig:
                 strategy=RoutingStrategy(spec.get("strategy", "round_robin")),
                 failover_on_client_error=bool(spec.get("failover_on_client_error", False)),
             )
+            canary_spec = spec.get("canary")
+            canary: CanaryRule | None = None
+            if canary_spec:
+                if not isinstance(canary_spec, dict) or not str(canary_spec.get("target") or ""):
+                    raise BadRequestError(f"model {model_name!r}: canary requires a 'target' model")
+                target = str(canary_spec["target"])
+                if target == model_name:
+                    raise BadRequestError(f"model {model_name!r}: canary target cannot be the model itself")
+                percent = float(canary_spec.get("percent", 0.0))
+                if not 0 <= percent <= 100:
+                    raise BadRequestError(f"model {model_name!r}: canary percent must be within [0, 100]")
+                canary = CanaryRule(
+                    target=target,
+                    percent=percent,
+                    keys=[str(k) for k in canary_spec.get("keys") or []],
+                    exclude_keys=[str(k) for k in canary_spec.get("exclude_keys") or []],
+                    salt=str(canary_spec.get("salt", "")),
+                )
             routes[model_name] = ModelRoute(
                 name=model_name,
                 deployments=deployments,
                 policy=policy,
                 fallbacks=[str(f) for f in spec.get("fallbacks", [])],
+                canary=canary,
             )
+        for name, route in routes.items():
+            if route.canary is not None and route.canary.target not in routes:
+                raise BadRequestError(
+                    f"model {name!r}: canary target {route.canary.target!r} is not a configured model"
+                )
         return Router(routes)
 
     # -- plugins ------------------------------------------------------------------

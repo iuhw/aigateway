@@ -9,16 +9,28 @@ Borrowed concepts (see docs/research-*.md):
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import random
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
+
+logger = logging.getLogger("aigateway.router")
 
 
 class RoutingStrategy(StrEnum):
     ROUND_ROBIN = "round_robin"
     WEIGHTED = "weighted"
     LEAST_LATENCY = "least_latency"
+
+
+_BUCKETS = 10_000
+
+
+def _hash_bucket(key: str) -> int:
+    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "big") % _BUCKETS
 
 
 @dataclass
@@ -30,6 +42,34 @@ class RoutePolicy:
     allowed_fails: int = 2
     strategy: RoutingStrategy = RoutingStrategy.ROUND_ROBIN
     failover_on_client_error: bool = False
+
+
+@dataclass
+class CanaryRule:
+    """Gradual-traffic-shift rule (blueprint M5): a share of requests for the
+    owning model route is diverted to the `target` model route.
+
+    Splitting is sticky per identity: the identity name is hashed into 10,000
+    buckets and the first `percent`% go to the target, so a given key always
+    lands on the same branch (salt reshuffles the assignment without moving
+    the ratio). Requests without a usable identity are split per-request by
+    chance. `keys` force-lists identities into the canary; `exclude_keys`
+    pins them to stable (wins over `keys`)."""
+
+    target: str
+    percent: float = 0.0
+    keys: list[str] = field(default_factory=list)
+    exclude_keys: list[str] = field(default_factory=list)
+    salt: str = ""
+
+    def snapshot(self) -> dict:
+        return {
+            "target": self.target,
+            "percent": self.percent,
+            "keys": list(self.keys),
+            "exclude_keys": list(self.exclude_keys),
+            "salt": self.salt,
+        }
 
 
 @dataclass
@@ -76,6 +116,7 @@ class ModelRoute:
     deployments: list[Deployment]
     policy: RoutePolicy = field(default_factory=RoutePolicy)
     fallbacks: list[str] = field(default_factory=list)
+    canary: CanaryRule | None = None
 
     def __post_init__(self) -> None:
         self._rr_cursor = 0
@@ -92,6 +133,7 @@ class ModelRoute:
                 "allowed_fails": self.policy.allowed_fails,
             },
             "fallbacks": self.fallbacks,
+            "canary": self.canary.snapshot() if self.canary else None,
         }
 
 
@@ -103,6 +145,37 @@ class Router:
 
     def route(self, model: str) -> ModelRoute | None:
         return self.routes.get(model)
+
+    def resolve_canary(self, model: str, *, identity: str | None = None) -> tuple[str, bool | None]:
+        """Apply the model's canary rule. Returns (effective_model, branch)
+        where branch is None (no rule), False (stable) or True (canary)."""
+        route = self.routes.get(model)
+        rule = route.canary if route is not None else None
+        if rule is None:
+            return model, None
+        if rule.target not in self.routes:
+            # Validation normally prevents this; a stale rule after a hot
+            # reload race must not take requests down.
+            logger.warning(
+                "canary target %r for model %r is not configured; serving stable", rule.target, model
+            )
+            return model, False
+        if identity and identity in rule.exclude_keys:
+            return model, False
+        if identity and identity in rule.keys:
+            return rule.target, True
+        if rule.percent >= 100:
+            return rule.target, True
+        if rule.percent <= 0:
+            return model, False
+        bucket = (
+            _hash_bucket(f"{rule.salt}\x1f{model}\x1f{identity}")
+            if identity and identity != "anonymous"
+            else random.randrange(_BUCKETS)
+        )
+        if bucket < int(round(rule.percent * (_BUCKETS / 100))):
+            return rule.target, True
+        return model, False
 
     def model_names(self) -> list[str]:
         return sorted(self.routes)

@@ -332,6 +332,22 @@ class GatewayApp:
             await self.state.plugins.run_request(ctx)
             self._acquire_concurrency(ctx)
 
+            # Canary split (M5): resolved after the plugin chain so the
+            # auth-provided identity can drive sticky hashing. On diversion
+            # ctx.model becomes the served model — metrics, pricing, usage
+            # reports and logs record what actually answered. Rate limiting
+            # and model allowlists above deliberately used the requested name.
+            identity = ctx.identity if isinstance(ctx.identity, dict) else {}
+            effective, branch = self.state.router.resolve_canary(
+                request.model, identity=identity.get("name")
+            )
+            if branch is not None:
+                self.metrics.inc_canary(request.model, "canary" if branch else "stable")
+                if branch:
+                    ctx.requested_model = request.model
+                    ctx.model = effective
+                    route = self.state.router.route(effective)
+
             # Response cache hit: serve without dispatching (non-streaming only).
             if ctx.cache_hit and ctx.response is not None:
                 ctx.status_code = 200

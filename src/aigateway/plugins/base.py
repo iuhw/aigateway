@@ -52,6 +52,9 @@ class PluginContext:
     client_host: str = ""
     #: Set by the auth plugin; consumed by rate limiting / usage accounting.
     identity: Any = None
+    #: Original model name when canary routing diverted the request to another
+    #: model route; None means the requested model is being served unchanged.
+    requested_model: str | None = None
     #: Populated after routing; used by logging.
     route: ModelRoute | None = None
     deployment: Deployment | None = None

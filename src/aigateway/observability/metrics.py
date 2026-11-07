@@ -99,6 +99,12 @@ class Metrics:
             ("plugin", "verdict"),
             registry=r,
         )
+        self.canary_requests_total = Counter(
+            "gateway_canary_requests_total",
+            "Canary split decisions for models with a canary rule (branch=canary|stable)",
+            ("model", "branch"),
+            registry=r,
+        )
 
     # -- convenience wrappers -------------------------------------------------
 
@@ -146,6 +152,9 @@ class Metrics:
 
     def inc_guardrail_flag(self, plugin: str, verdict: str) -> None:
         self.guardrail_flags_total.labels(plugin=plugin, verdict=verdict).inc()
+
+    def inc_canary(self, model: str, branch: str) -> None:
+        self.canary_requests_total.labels(model=model, branch=branch).inc()
 
     def inc_attempt(self, model: str, provider: str, outcome: str) -> None:
         self.upstream_attempts_total.labels(model=model, provider=provider, outcome=outcome).inc()
