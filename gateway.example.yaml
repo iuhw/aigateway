@@ -81,6 +81,12 @@ providers:
 # round_robin | weighted | least_latency. Lower `priority` is preferred; the
 # next tier is only used while all lower-tier deployments cool down.
 # `fallbacks` names other model routes to try when every deployment failed.
+# `canary` (M5) diverts a percentage of traffic to another configured model
+# route: sticky per virtual-key identity (blake2b hash into 10k buckets),
+# per-request chance for anonymous traffic; `keys` force-lists identities into
+# the canary, `exclude_keys` pins them to stable. The served model name is
+# what metrics/pricing/reports record; the split is counted in
+# gateway_canary_requests_total{model, branch}.
 models:
   glm4:9b:
     deployments:
@@ -92,11 +98,21 @@ models:
       cooldown_s: 30
       allowed_fails: 2
       strategy: round_robin
-  # gpt-4o-mini:
+  # gpt-4o:
   #   deployments:
   #     - provider: openai
-  #       model: gpt-4o-mini
-  #   fallbacks: [glm4:9b]
+  #       model: gpt-4o
+  #   canary:                         # M5 gradual rollout (opt-in)
+  #     target: gpt-4o-canary         # another configured model route
+  #     percent: 10                   # share diverted to the target
+  #     keys: [beta-testers]          # optional: always-canary identities
+  #     exclude_keys: [vip]           # optional: never-canary identities
+  #     salt: "round-1"               # optional: reshuffle assignments
+  # gpt-4o-canary:
+  #   deployments:
+  #     - provider: openai
+  #       model: gpt-4o-2026-06-preview
+  #   fallbacks: [gpt-4o]             # canary route may fall back to stable
 
 # ---- plugins (order configurable via `order`, lower runs first) -----------
 plugins:
@@ -148,6 +164,23 @@ plugins:
     config:
       max_records: 50000            # ring size (oldest dropped first)
       retention_hours: 24           # lookback window served by /admin/usage
+  # ---- M5 prompt templates (opt-in; the reference request-rewrite plugin) ----
+  # Injects a gateway-owned system prompt per model / virtual key. Variables:
+  # {model}, {key}, static `variables`, identity metadata fields, and
+  # allowlisted request headers. Unknown {placeholders} stay verbatim and
+  # substituted values are never re-expanded. Modes: prepend (default) /
+  # append / replace. Any plugin may rewrite ctx.payload["messages"] in
+  # on_request the same way — this is the supported request-rewrite hook.
+  # prompt-template-plugin:
+  #   config:
+  #     templates:
+  #       - models: ["glm4:*"]            # fnmatch on requested model (optional)
+  #         keys: ["team-a"]              # exact virtual-key names (optional)
+  #         metadata: {tier: premium}     # identity-metadata subset (optional)
+  #         system: "You are the {product} assistant for {team}."
+  #         mode: prepend
+  #         variables: {product: ACME}
+  #         header_variables: [x-team]    # request headers exposed as {x_team}
   # ---- M3 safety guardrails (all opt-in; delete the block to disable) --------
   # pii-redaction-plugin:
   #   config:

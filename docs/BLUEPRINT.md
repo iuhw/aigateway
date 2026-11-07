@@ -171,14 +171,44 @@ v0.1 现状 ──► M1 治理 ──► M2 缓存 ──► M3 安全 ──�
     零错误、RSS 后半程净增 +0.3 MB、句柄斜率 +3.2/min（阈值内）——10 分钟持续导出失败
     不泄漏、不拖垮请求路径。
 
-### M5（v0.6）提示词工程与灰度
+### M5（v0.6）提示词工程与灰度 ✅（2026-11-07 已交付）
 
 - **`prompt-template-plugin`**：按模型/身份注入系统提示模板，支持变量；`on_request` 改写钩子
   公开为受支持的扩展点（请求改写）。
 - **灰度切流**：路由层新增按身份哈希/百分比的模型路由分流（canary），流量打标进指标与日志；
   在 weighted 之上实现，不改变 priority tier 语义。
-- **提示词压缩**：探索项（上游 `prompt compression` 如 Kong+Bedrock 的做法）。
+- **提示词压缩**：探索项（上游 `prompt compression` 如 Kong+Bedrock 的做法）——本次**未立项**，
+  留在探索池（遵循"锁定探索池不承诺排期"原则）。
 - **验收**：灰度比例统计测试（大样本偏差 <5%）；模板注入回归测试；灰度与 fallback 组合的失败模型测试。
+- **交付记录**（2026-11-07 迭代，382 tests）：
+  - `prompt-template-plugin`（`cfbb002`）：规则按模型 fnmatch / 虚拟 key 名 / 身份 metadata
+    子集匹配，全部匹配规则按配置顺序依次生效；变量优先级 内置(model/key) < 静态 variables <
+    身份 metadata < 白名单请求头；渲染为**单遍替换**——未知占位符原样保留（模板可安全书写
+    JSON 示例）、变量值不二次展开（客户端内容无法借道变量注入）；prepend/append/replace 三种
+    合并模式（replace 清除客户端 system）；非流式/流式同路径（on_request 改写 payload）。
+    该插件同时是 **on_request 请求改写扩展点的参考实现**（operations.md 边界 18）；
+  - **canary 切流**（`332522f`）：`models.<name>.canary` 配置（target/percent/keys/exclude_keys/
+    salt），身份名 blake2b 哈希入 1 万桶**粘性分流**（同 key 恒定落同分支，salt 重排不移动比例），
+    匿名流量按请求随机；解析在插件链之后（需认证身份），故**限流与模型白名单按请求模型计、
+    指标/定价/报表/日志按生效模型计**（ctx.model 改写，ctx.requested_model 保留原模型进日志）；
+    新指标 `gateway_canary_requests_total{model,branch}`（仅配置了 canary 的模型产生序列）；
+    校验期拒绝 target 未配置/指向自身/percent 越界，热重载竞态下 target 缺失按 stable 放行；
+    不改变 weighted/priority tier 语义（canary 选择路由，路由内分层照旧）；
+  - 验收达成：13 项模板测试（含**单遍渲染回归**——变量值含 `{other}` 不再展开、未知占位符
+    保真）+ 17 项 canary 测试（**1 万合成身份偏差 <5% 达标**、粘性确定性、salt 重排、
+    keys/exclude 优先级、匿名随机分布、**灰度路由失败经 fallbacks 回落 stable**、定价与报表
+    按生效模型归集、配置校验三连）；382 tests 全绿；
+  - 基准达成：**背靠背同窗对比**口径下，M5（模板注入 + canary）在 M4 全链之上 +0.025ms
+    （0.577 → 0.602ms，增幅 +4.3%，门槛 <10% 达标）；流式 TTFT 与 M4 链持平（噪声内）；
+    新基准场景 10（全链+M5 非流式/流式，背靠背 M4 窗口）；
+  - E2E 升至 **21 项全过**（真实 GLM-4-9B）：check-20 网关侧系统提示（{key} 变量渲染为
+    e2e-tester）驱动真实模型在每条回复末尾携带签名 token（且无未替换字面量）——模板注入经
+    实弹验证；check-21 `e2e-canary` 虚拟 key 强制分流至 `glm4:9b-canary` 别名上游（响应体
+    served model 直接证明分流）+ 默认 key 保持 stable + `gateway_canary_requests_total`
+    双分支计数；`ollama cp` 别名标签零额外磁盘。
+- **边界**（operations.md 18/19）：header_variables 是显式白名单（请求头客户端可控）；缓存键
+  为请求模型——canary 两分支共享响应缓存条目（与 fallback 跨路由共享缓存的既有语义一致）；
+  canary 只解析一跳；embeddings 不走 canary；提示词压缩未立项。
 
 ### v1.0（GA）稳定化
 

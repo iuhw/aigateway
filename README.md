@@ -15,7 +15,10 @@ Envoy AI Gateway 的成熟设计自主实现（调研见 [docs/](docs/)）。
 - 多上游：一切 OpenAI 协议服务（OpenAI / Ollama / vLLM / DeepSeek / Groq / LM Studio …），
   以及 **原生协议适配器**（`type: anthropic` / `type: gemini` / `type: bedrock`，含 SigV4 签名）——
   同一公开模型可跨厂商组合部署与降级
-- 路由：模型 → 多部署映射，round-robin / weighted / least-latency 负载均衡，优先级分层（priority tier）
+- 路由：模型 → 多部署映射，round-robin / weighted / least-latency 负载均衡，优先级分层（priority tier）；
+  **灰度切流**（M5）：`canary` 按身份哈希/百分比把流量分流到另一条模型路由（粘性分流、
+  强制/排除 key 名单、盐值重排），生效模型计入指标（`gateway_canary_requests_total`）、
+  定价与报表，日志同时携带请求模型与生效模型
 - 可靠性：超时、指数退避重试、部署间故障转移、模型级降级链（fallbacks）、
   连续失败冷却熔断（cooldown，借鉴 LiteLLM）、流式首块前可无感切换
 - **多实例共享状态**：Redis 后端的分布式限流（原子固定窗口，fail-open 可配）与跨副本冷却同步；
@@ -55,6 +58,7 @@ Envoy AI Gateway 的成熟设计自主实现（调研见 [docs/](docs/)）。
 | `otel-export-plugin` | **OTLP 追踪导出**（M4，`pip install 'aigateway[otel]'`）：每请求 span + TTFT 事件，多尝试/失败调度附 `gateway.upstream` 子 span；BatchSpanProcessor 后台导出（collector 故障零请求路径影响）；span 只含元数据、绝无内容；采样率可配 |
 | `langfuse-export-plugin` | **Langfuse 追踪导出**（M4）：Langfuse 原生 OTLP preset（host + public/secret key Basic auth），复用 otel-export 全部机制 |
 | `usage-report-plugin` | **用量报表**（M4）：`/admin/usage` report 段按 key/model/小时或天桶聚合；内存环形存储（容量/保留期双上限，per-replica 视图） |
+| `prompt-template-plugin` | **提示词模板注入**（M5）：按模型（fnmatch）/虚拟 key/身份元数据注入网关侧系统提示；变量渲染（内置 model/key + 静态变量 + 身份 metadata + 白名单请求头），未知占位符原样保留、变量值不二次展开；prepend/append/replace 三种合并模式。也是 **on_request 请求改写扩展点**的参考实现 |
 
 - 插件链按 `order` 排序执行；钩子点：`on_request / on_response / on_stream_start / on_stream_chunk / on_stream_end / on_error`
 - **第三方插件零侵入**：外部 Python 模块即可注册（配置 `module`/`class`，或 `@register_plugin` 装饰器）
@@ -99,7 +103,7 @@ client ──► FastAPI (api.py)
 ## 测试与基准
 
 ```bash
-.venv/Scripts/python -m pytest tests/ -q        # 352 个测试（含故障注入/混沌/多实例/安全/热重载/停机/tools/embeddings/原生适配器 embeddings/预算/分层定价/租户治理/Admin API/语义缓存/PII 脱敏/提示词注入防护/webhook 审核/OTLP 导出/真实 OTLP wire/用量报表）
+.venv/Scripts/python -m pytest tests/ -q        # 382 个测试（含故障注入/混沌/多实例/安全/热重载/停机/tools/embeddings/原生适配器 embeddings/预算/分层定价/租户治理/Admin API/语义缓存/PII 脱敏/提示词注入防护/webhook 审核/OTLP 导出/真实 OTLP wire/用量报表/提示词模板/灰度切流）
 .venv/Scripts/python -m ruff check src tests    # lint
 .venv/Scripts/python benchmarks/bench_gateway.py  # 基准 → docs/benchmark-report.md
 
@@ -111,16 +115,17 @@ client ──► FastAPI (api.py)
 
 量化结论（报告见 docs/）：
 
-- **网关自身开销** p50 0.42ms（~2400 RPS 单进程），全插件链（7 插件，含护栏）+0.07ms，
-  M4 可观测插件（otel 导出 + 用量报表）再 +0.046ms（背靠背同窗对比，<10% 门槛达标），
+- **网关自身开销** p50 0.42ms（~2100 RPS 单进程），全插件链（7 插件，含护栏）+0.07ms，
+  M4 可观测插件（otel 导出 + 用量报表）再 +0.046ms，M5（提示词模板注入 + canary 切流）
+  再 +0.025ms（均背靠背同窗对比，<10% 门槛达标），
   语义命中 0.461ms，webhook 审核路径见基准报告场景 9
 - **真实 HTTP 双臂对测**（全 9 插件链，M4 otel 真实导出到本地 collector）：网关开销 p99
   -12.8ms（与直连同水平）、TTFT 开销 p50 -8.7ms，错误率 0%
 - **混沌注入**（30% 随机故障+延迟，300 请求）：零挂起、100% 终态映射、>97% 成功率
 - **耐久**：10 分钟 @300 RPS 零错误（全 9 插件链，**collector 故意宕机全程导出失败**），
   RSS 后半程净增 +0.3 MB（无泄漏迹象）
-- **E2E 19/19**（真实 GLM-4-9B，含 M4 三项：真实 OTLP collector 收到含 failover 子 span
-  的解码 protobuf、/admin/usage 报表精确对账、collector 宕机请求不受影响）
+- **E2E 21/21**（真实 GLM-4-9B，M4 三项 + M5 两项：网关侧系统提示携 {key} 变量渲染驱动
+  真实模型回复格式、按身份强制分流 canary 路由（响应体 served model + 指标双侧验证））
 
 ## Ollama 端到端验证
 
@@ -172,16 +177,17 @@ src/aigateway/
     bedrock_provider.py    AWS Bedrock Converse 原生上游
     sigv4.py            AWS SigV4 请求签名（纯标准库，botocore 交叉验证）
     mock_provider.py     确定性 mock（测试/基准）
-    router.py       路由、负载均衡、冷却、优先级分层、冷却导入导出
+    router.py       路由、负载均衡、冷却、优先级分层、canary 灰度切流、冷却导入导出
     dispatcher.py   重试/退避/故障转移/降级链/流式切换
   plugins/
     base.py         Plugin 接口、PluginChain、注册表、外部加载
     keyword_filter.py / pii_redaction.py / prompt_guard.py / webhook_review.py / auth.py / rate_limit.py / response_cache.py / request_log.py / semantic_cache.py
     otel_export.py / langfuse_export.py / usage_report.py   （M4 可观测导出与报表）
+    prompt_template.py （M5 提示词模板注入；on_request 请求改写扩展点参考实现）
   observability/metrics.py   Prometheus 指标（含成本）
-tests/              352 tests（单元/集成/wire 故障注入/混沌/多实例/安全/热重载/停机/Anthropic/tools/embeddings/原生适配器 embeddings/预算/定价/租户治理/Admin API/语义缓存/PII/注入防护/webhook 审核/OTLP 导出与真实 wire/用量报表）
+tests/              382 tests（单元/集成/wire 故障注入/混沌/多实例/安全/热重载/停机/Anthropic/tools/embeddings/原生适配器 embeddings/预算/定价/租户治理/Admin API/语义缓存/PII/注入防护/webhook 审核/OTLP 导出与真实 wire/用量报表/提示词模板/canary 灰度）
 benchmarks/         基准测试（--quick 供 CI）
-scripts/            负载测试、soak 耐久、并行下载器、Ollama 安装、E2E 验证（16 项，含 M3 护栏）
+scripts/            负载测试、soak 耐久、并行下载器、Ollama 安装、E2E 验证（21 项，含 M3 护栏/M4 可观测/M5 模板与灰度）
 deploy/             生产配置、Prometheus 抓取、Grafana 仪表盘与数据源
 docs/               调研（3 篇）、项目蓝图与复盘、基准/负载/soak/E2E 报告、运维手册
 ```
