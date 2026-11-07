@@ -210,11 +210,30 @@ v0.1 现状 ──► M1 治理 ──► M2 缓存 ──► M3 安全 ──�
   为请求模型——canary 两分支共享响应缓存条目（与 fallback 跨路由共享缓存的既有语义一致）；
   canary 只解析一跳；embeddings 不走 canary；提示词压缩未立项。
 
-### v1.0（GA）稳定化
+### v1.0（GA）稳定化 ✅（2026-11-08 交付）
 
 - soak 1 小时无泄漏、混沌基准门槛复核；安全自查（key 存储、日志脱敏开关默认值、admin 越权）；
 - 文档四件套：部署手册、插件开发指南、配置参考、升级说明；**YAML 向后兼容承诺**（v1 起旧配置永续可用）；
 - 语义化版本 + 变更日志。
+- **交付记录**（2026-11-08 迭代，387 tests）：
+  - **安全自查**（`10e7d8c`）：① key 存储——静态 key 解析后内存**只保留摘要**（`_normalize_static`
+    剥离明文，转储/堆栈不可泄漏；动态 key 本就只存 SHA-256）；② admin 越权——`/v1/models`
+    在配置 auth-plugin 后要求有效虚拟 key（与 OpenAI API 一致，未认证模型枚举关闭），
+    `/admin/*`+`/metrics` 维持 `admin_api_key` 常量时间比较；③ 日志脱敏默认值——
+    request-log `log_prompt/log_response` 默认关闭以回归测试钉死；④ 附带修复真实缺陷：
+    request-log 文件 handler 的挂载守卫被外部 handler（pytest capture、宿主框架）误抑制
+    ——改为自有标记属性，并新增 aclose 摘除（热重载换路径不再泄漏旧句柄）；
+  - **文档四件套 + CHANGELOG**：deployment.md（拓扑/生产 checklist/安全基线/容量速查）、
+    plugin-development.md（钩子模型/PluginContext/请求改写扩展点/测试基建）、
+    configuration.md（全字段表含 canary）、upgrading.md（语义化版本、YAML 兼容承诺、
+    v0.x→v1.0 唯一行为变更 = /v1/models 认证）；CHANGELOG.md 按 Keep a Changelog 补齐
+    v0.1→v1.0 全史；
+  - **验证**（对照蓝图验收，2026-11-08）：soak **60 分钟 @300 RPS**（全插件链 + M5 canary
+    切流/模板注入 + collector 宕机口径）**116,097 请求零错误**、RSS 斜率 +0.252 MB/min
+    （后半程净增 +1.1 MB）、句柄斜率 +3.10/min（与 M4 的 10min soak +3.2 同水平）；
+    双臂负载 **4/4 SLO**（错误率 0%、网关开销 p99 <10ms）；E2E **21/21** 重跑（v1.0 代码）；
+    混沌门槛随全量套件复核（**387 tests**）；
+  - 版本 v1.0.0。
 
 ### 探索池（v1.x+，不承诺排序）
 

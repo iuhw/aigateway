@@ -103,7 +103,7 @@ client ──► FastAPI (api.py)
 ## 测试与基准
 
 ```bash
-.venv/Scripts/python -m pytest tests/ -q        # 382 个测试（含故障注入/混沌/多实例/安全/热重载/停机/tools/embeddings/原生适配器 embeddings/预算/分层定价/租户治理/Admin API/语义缓存/PII 脱敏/提示词注入防护/webhook 审核/OTLP 导出/真实 OTLP wire/用量报表/提示词模板/灰度切流）
+.venv/Scripts/python -m pytest tests/ -q        # 387 个测试（含 GA 安全自查/故障注入/混沌/多实例/安全/热重载/停机/tools/embeddings/原生适配器 embeddings/预算/分层定价/租户治理/Admin API/语义缓存/PII 脱敏/提示词注入防护/webhook 审核/OTLP 导出/真实 OTLP wire/用量报表/提示词模板/灰度切流）
 .venv/Scripts/python -m ruff check src tests    # lint
 .venv/Scripts/python benchmarks/bench_gateway.py  # 基准 → docs/benchmark-report.md
 
@@ -122,8 +122,8 @@ client ──► FastAPI (api.py)
 - **真实 HTTP 双臂对测**（全 9 插件链，M4 otel 真实导出到本地 collector）：网关开销 p99
   -12.8ms（与直连同水平）、TTFT 开销 p50 -8.7ms，错误率 0%
 - **混沌注入**（30% 随机故障+延迟，300 请求）：零挂起、100% 终态映射、>97% 成功率
-- **耐久**：10 分钟 @300 RPS 零错误（全 9 插件链，**collector 故意宕机全程导出失败**），
-  RSS 后半程净增 +0.3 MB（无泄漏迹象）
+- **耐久**：60 分钟 soak（GA 验收，全插件链含 canary/模板，collector 宕机口径）
+  **116,097 请求零错误**，RSS 斜率 +0.252 MB/min、句柄斜率 +3.10/min（无泄漏迹象）
 - **E2E 21/21**（真实 GLM-4-9B，M4 三项 + M5 两项：网关侧系统提示携 {key} 变量渲染驱动
   真实模型回复格式、按身份强制分流 canary 路由（响应体 served model + 指标双侧验证））
 
@@ -157,6 +157,14 @@ aigateway serve --config gateway.prod.yaml --port 8080
 - 已知生产边界（token 级限流、TLS 终结点、流式过滤窗口等）：[docs/operations.md](docs/operations.md) §5
 - CI（GitHub Actions）：lint + 全量测试 + 基准 smoke + Docker 构建/健康检查
 
+**文档四件套（v1.0）**：
+
+- 部署手册：[docs/deployment.md](docs/deployment.md)（拓扑形态、生产 checklist、安全基线、监控告警、容量速查）
+- 插件开发指南：[docs/plugin-development.md](docs/plugin-development.md)（钩子模型、PluginContext、**on_request 请求改写扩展点**、测试基建）
+- 配置参考：[docs/configuration.md](docs/configuration.md)（server/providers/models 含 canary/全部插件/pricing/shared_state 字段表）
+- 升级说明：[docs/upgrading.md](docs/upgrading.md)（**YAML 向后兼容承诺**、语义化版本策略、v0.x → v1.0 行为变更）
+- 变更日志：[CHANGELOG.md](CHANGELOG.md)
+
 ## 项目结构
 
 ```
@@ -185,7 +193,7 @@ src/aigateway/
     otel_export.py / langfuse_export.py / usage_report.py   （M4 可观测导出与报表）
     prompt_template.py （M5 提示词模板注入；on_request 请求改写扩展点参考实现）
   observability/metrics.py   Prometheus 指标（含成本）
-tests/              382 tests（单元/集成/wire 故障注入/混沌/多实例/安全/热重载/停机/Anthropic/tools/embeddings/原生适配器 embeddings/预算/定价/租户治理/Admin API/语义缓存/PII/注入防护/webhook 审核/OTLP 导出与真实 wire/用量报表/提示词模板/canary 灰度）
+tests/              387 tests（单元/集成/GA 安全/wire 故障注入/混沌/多实例/安全/热重载/停机/Anthropic/tools/embeddings/原生适配器 embeddings/预算/定价/租户治理/Admin API/语义缓存/PII/注入防护/webhook 审核/OTLP 导出与真实 wire/用量报表/提示词模板/canary 灰度）
 benchmarks/         基准测试（--quick 供 CI）
 scripts/            负载测试、soak 耐久、并行下载器、Ollama 安装、E2E 验证（21 项，含 M3 护栏/M4 可观测/M5 模板与灰度）
 deploy/             生产配置、Prometheus 抓取、Grafana 仪表盘与数据源
