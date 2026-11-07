@@ -37,8 +37,12 @@ EmbedFn = Callable[[list[str]], Awaitable[list[list[float]] | None]]
 
 
 def partition_key(model: str, payload: dict[str, Any]) -> str:
-    """Fingerprint of everything EXCEPT the prompt text: same partition means
-    the responses are directly interchangeable, only wording may differ."""
+    """Fingerprint of everything EXCEPT the embedded text: same partition means
+    the responses are directly interchangeable, only wording may differ.
+
+    System messages are fingerprinted here instead of being embedded (see
+    `messages_text`): requests running under different system prompts land in
+    different partitions and can never serve each other's cached answers."""
     normalized = {
         "model": model,
         "temperature": payload.get("temperature"),
@@ -49,14 +53,35 @@ def partition_key(model: str, payload: dict[str, Any]) -> str:
         "tools": payload.get("tools"),
         "tool_choice": payload.get("tool_choice"),
         "response_format": payload.get("response_format"),
+        "system": _system_text(payload),
     }
     blob = json.dumps(normalized, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
+def _system_text(payload: dict[str, Any]) -> str:
+    parts = [
+        message_text(message)
+        for message in payload.get("messages") or []
+        if isinstance(message, dict) and message.get("role") == "system"
+    ]
+    return "\n".join(part for part in parts if part)
+
+
 def messages_text(payload: dict[str, Any]) -> str:
-    """All chat message text (system+user+assistant), newline-joined."""
-    parts = [message_text(message) for message in payload.get("messages") or []]
+    """Conversation text WITHOUT system messages, newline-joined.
+
+    System prompts are frequently byte-identical across requests (gateway
+    template injection or a fixed client wrapper); embedding them dominates
+    the vector and compresses every pair above any usable threshold — a
+    measured case put ALL prompt pairs at >=0.98 cosine. The similarity
+    search must compare what actually varies: the conversation text. System
+    identity is enforced by the partition fingerprint instead."""
+    parts = [
+        message_text(message)
+        for message in payload.get("messages") or []
+        if isinstance(message, dict) and message.get("role") != "system"
+    ]
     return "\n".join(part for part in parts if part)
 
 

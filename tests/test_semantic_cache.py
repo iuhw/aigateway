@@ -31,7 +31,23 @@ def test_partition_key_ignores_prompt_but_not_params():
     assert partition_key("m", base) != partition_key("m", {**base, "tools": [{"type": "function"}]})
 
 
-def test_messages_text_joins_all_roles():
+def test_partition_key_separates_system_prompts():
+    """GA finding: different system prompts must never share a partition —
+    a cached answer generated under one system prompt is not interchangeable
+    with another (system is fingerprinted, not embedded)."""
+    with_sys_a = {"messages": [{"role": "system", "content": "be terse"}, {"role": "user", "content": "hi"}]}
+    with_sys_b = {"messages": [{"role": "system", "content": "be poetic"}, {"role": "user", "content": "hi"}]}
+    assert partition_key("m", with_sys_a) != partition_key("m", with_sys_b)
+    assert partition_key("m", with_sys_a) == partition_key("m", dict(with_sys_a))
+    # same system prompt (e.g. gateway template injection) stays one partition
+    assert partition_key("m", with_sys_a) == partition_key("m", {**with_sys_a, "messages": [
+        {"role": "system", "content": "be terse"}, {"role": "user", "content": "different question"},
+    ]})
+    no_system = partition_key("m", {"messages": [{"role": "user", "content": "hi"}]})
+    assert no_system != partition_key("m", with_sys_a)
+
+
+def test_messages_text_excludes_system():
     payload = {
         "messages": [
             {"role": "system", "content": "be terse"},
@@ -39,8 +55,9 @@ def test_messages_text_joins_all_roles():
             {"role": "assistant", "content": "hello"},
         ]
     }
-    assert messages_text(payload) == "be terse\nhi\nhello"
+    assert messages_text(payload) == "hi\nhello"
     assert messages_text({"messages": []}) == ""
+    assert messages_text({"messages": [{"role": "system", "content": "only"}]}) == ""
 
 
 def test_missing_embed_model_self_disables():

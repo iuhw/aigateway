@@ -31,6 +31,15 @@ via ASGITransport but a REAL upstream Ollama server):
      steers the real model's reply format
   21 canary split: forced identity lands on the canary route (served model
      name + gateway_canary_requests_total), others stay stable
+  22 Admin API v1 live: dynamic key CRUD (create/list-masked/auth/delete),
+     admin surface protection (virtual key denied on /admin/*)
+  23 budget hard limit live: tiny daily_usd budget -> spend trips -> 429
+     budget_exceeded (check-then-bill)
+  24 key lifecycle live: expires_at -> 403 key_expired; concurrency 1 ->
+     second in-flight request 429 concurrency_exceeded
+  25 semantic cache live over real embeddings (ollama nomic-embed-text):
+     paraphrase hits the cached answer, hit counted in metrics
+  26 hot reload live: config file edit adds a model route and serves it
 
 The webhook-review check needs a review service: this script starts a tiny
 local allow-stub on 127.0.0.1:11439 (matching gateway.ollama.yaml) for the
@@ -38,6 +47,9 @@ whole run. Checks 17-19 need a trace sink: the script also starts a minimal
 OTLP/HTTP collector stub on 127.0.0.1:11440 and shuts it down for check 19.
 Checks 20-21 need the prompt-template/canary config in gateway.ollama.yaml
 and the `glm4:9b-canary` ollama tag (ollama cp glm4:9b glm4:9b-canary).
+Checks 22-26 need server.admin_api_key + pricing in gateway.ollama.yaml,
+the `nomic-embed-text` ollama model (semantic cache), and an admin key
+(header constant ADMIN_AUTH = admin-e2e-key).
 """
 
 from __future__ import annotations
@@ -48,6 +60,7 @@ import json
 import sys
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -59,6 +72,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from aigateway.api import create_app  # noqa: E402
 
 RESULTS: list[tuple[str, bool, str]] = []
+
+ADMIN_AUTH = {"Authorization": "Bearer admin-e2e-key"}
 
 
 def record(name: str, ok: bool, detail: str) -> None:
@@ -214,7 +229,7 @@ async def check_9_failover(client: httpx.AsyncClient) -> None:
 
 
 async def check_10_metrics(client: httpx.AsyncClient) -> None:
-    text = (await client.get("/metrics", headers={"Authorization": "Bearer sk-e2e-demo-key"})).text
+    text = (await client.get("/metrics", headers=ADMIN_AUTH)).text
     needed = ["gateway_requests_total", "gateway_request_latency_seconds", "gateway_tokens_total"]
     missing = [n for n in needed if n not in text]
     record("10 Prometheus metrics", not missing, f"missing={missing or 'none'}")
@@ -317,7 +332,7 @@ async def check_16_webhook_review(client: httpx.AsyncClient) -> None:
     """Normal traffic flows through the allow-stub review service; the
     guardrail counter records the allowed verdicts."""
     response = await chat(client, "glm4:9b", "回复ok两个字")
-    metrics_text = (await client.get("/metrics", headers={"Authorization": "Bearer sk-e2e-demo-key"})).text
+    metrics_text = (await client.get("/metrics", headers=ADMIN_AUTH)).text
     counter_present = 'gateway_guardrail_flags_total{plugin="webhook-review-plugin",verdict="allowed"}' in metrics_text
     record(
         "16 webhook-review allow path",
@@ -355,7 +370,7 @@ async def check_17_otlp_traces(collector: OtlpCollector) -> None:
 async def check_18_usage_report(client: httpx.AsyncClient) -> None:
     """/admin/usage report section reconciles exactly with a known batch of
     requests served between two reads (2 non-stream + 1 stream)."""
-    admin = {"Authorization": "Bearer sk-e2e-demo-key"}
+    admin = ADMIN_AUTH
     before = (await client.get("/admin/usage", headers=admin)).json()["report"]
     responses = [
         await chat(client, "glm4:9b", "只回复数字1"),
@@ -414,12 +429,24 @@ async def check_20_prompt_template(client: httpx.AsyncClient) -> None:
 async def check_21_canary_split(client: httpx.AsyncClient) -> None:
     """M5: the `e2e-canary` virtual key is forced onto the glm4-canary route
     (distinct upstream tag -> served model name proves the diversion); the
-    default key stays stable. Branch decisions are counted in /metrics."""
-    stable = await chat(client, "glm4:9b", "回答ok")
+    default key stays stable. Branch decisions are counted in /metrics.
+    Prompts are unique per run: the exact/semantic response caches key on the
+    requested model and are shared across canary branches by design (boundary
+    19), so a cacheable prompt would return a cached stable answer before
+    routing proves anything."""
+    nonce = uuid.uuid4().hex[:8]
+    # Long, mutually-unrelated prompts: the exact/semantic caches key on the
+    # requested model and are shared across canary branches by design
+    # (boundary 19) — a short or similar pair would let the semantic cache
+    # answer the diverted request from the stable branch before routing runs.
+    stable = await chat(client, "glm4:9b", f"请介绍一下像素艺术的历史背景和发展脉络{nonce}")
     diverted = await client.post(
         "/v1/chat/completions",
         headers={"Authorization": "Bearer sk-e2e-canary-key"},
-        json={"model": "glm4:9b", "messages": [{"role": "user", "content": "回答好"}]},
+        json={
+            "model": "glm4:9b",
+            "messages": [{"role": "user", "content": f"请解释一下绿色植物光合作用的基本原理{nonce}"}],
+        },
         timeout=320,
     )
     if stable.status_code != 200 or diverted.status_code != 200:
@@ -431,7 +458,7 @@ async def check_21_canary_split(client: httpx.AsyncClient) -> None:
         return
     served_stable = stable.json().get("model")
     served_canary = diverted.json().get("model")
-    metrics_text = (await client.get("/metrics", headers={"Authorization": "Bearer sk-e2e-demo-key"})).text
+    metrics_text = (await client.get("/metrics", headers=ADMIN_AUTH)).text
     # prometheus_client sorts label names alphabetically in the exposition
     # format — match on label pairs, not the exact serialized order.
     canary_lines = [
@@ -445,6 +472,174 @@ async def check_21_canary_split(client: httpx.AsyncClient) -> None:
         ok,
         f"stable-served={served_stable} canary-served={served_canary} "
         f"metrics(canary)={canary_counted} metrics(stable)={stable_counted}",
+    )
+
+
+async def check_22_admin_key_crud(client: httpx.AsyncClient) -> None:
+    """M1 Admin API v1 live: dynamic key CRUD, masked listing, auth roundtrip,
+    admin-surface protection (virtual key must NOT grant admin access)."""
+    denied = await client.get("/admin/keys", headers={"Authorization": "Bearer sk-e2e-demo-key"})
+    created = await client.post(
+        "/admin/keys", headers=ADMIN_AUTH, json={"name": "dyn-admin", "rpm": 60}
+    )
+    if created.status_code != 201:
+        record("22 admin key CRUD", False, f"create={created.status_code} body={created.text[:120]}")
+        return
+    raw_key = created.json()["api_key"]
+    listed = (await client.get("/admin/keys", headers=ADMIN_AUTH)).json()["keys"]
+    entry = next((k for k in listed if k.get("name") == "dyn-admin"), None)
+    masked_ok = bool(entry) and "key" not in entry and str(entry.get("key_hash", "")).endswith("…")
+    authed = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={"model": "glm4:9b", "messages": [{"role": "user", "content": "回答ok"}]},
+        timeout=320,
+    )
+    deleted = await client.delete("/admin/keys/dyn-admin", headers=ADMIN_AUTH)
+    after_delete = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={"model": "glm4:9b", "messages": [{"role": "user", "content": "回答好"}]},
+        timeout=320,
+    )
+    ok = (
+        denied.status_code == 401
+        and masked_ok
+        and authed.status_code == 200
+        and deleted.status_code == 200
+        and after_delete.status_code == 401
+    )
+    record(
+        "22 admin key CRUD + protection",
+        ok,
+        f"virtual-key-denied={denied.status_code} masked={masked_ok} "
+        f"auth={authed.status_code} delete={deleted.status_code} after-delete={after_delete.status_code}",
+    )
+
+
+async def check_23_budget_hard_limit(client: httpx.AsyncClient) -> None:
+    """M1 budget hard limit live: a dynamic key with a tiny daily USD budget
+    serves until the ledger (check-then-bill) trips, then 429 budget_exceeded.
+    Prompts are unique per run — cache hits are not billed (by design), so a
+    cacheable prompt would never trip the ledger."""
+    nonce = uuid.uuid4().hex[:8]
+    created = await client.post(
+        "/admin/keys",
+        headers=ADMIN_AUTH,
+        json={"name": "dyn-budget", "budgets": {"daily_usd": 0.000001}},
+    )
+    raw_key = created.json()["api_key"]
+    headers = {"Authorization": f"Bearer {raw_key}"}
+    first = await chat_with(client, headers, f"回答ok-{nonce}")
+    second = await chat_with(client, headers, f"回答好-{nonce}")
+    code = ""
+    if second.status_code == 429:
+        code = second.json().get("error", {}).get("code", "")
+    ok = first.status_code == 200 and second.status_code == 429 and code == "budget_exceeded"
+    record(
+        "23 budget hard limit",
+        ok,
+        f"first={first.status_code} second={second.status_code} code={code!r} "
+        f"(pricing glm4:9b input_per_1k=1.0; budget daily_usd=0.000001)",
+    )
+
+
+async def check_24_key_lifecycle(client: httpx.AsyncClient) -> None:
+    """M1 key lifecycle live: expired key -> 403 key_expired; concurrency cap
+    -> second in-flight request 429 concurrency_exceeded."""
+    created = await client.post(
+        "/admin/keys",
+        headers=ADMIN_AUTH,
+        json={"name": "dyn-expired", "expires_at": "2020-01-01T00:00:00+00:00"},
+    )
+    expired = await chat_with(client, {"Authorization": f"Bearer {created.json()['api_key']}"}, "回答ok")
+    expired_code = expired.json().get("error", {}).get("code", "") if expired.status_code == 403 else ""
+
+    conc = await client.post(
+        "/admin/keys", headers=ADMIN_AUTH, json={"name": "dyn-conc", "concurrency": 1}
+    )
+    conc_headers = {"Authorization": f"Bearer {conc.json()['api_key']}"}
+    import asyncio as _asyncio
+
+    responses = await _asyncio.gather(
+        chat_with(client, conc_headers, "从1数到3"),
+        chat_with(client, conc_headers, "从4数到6"),
+    )
+    statuses = sorted(r.status_code for r in responses)
+    conc_codes = [
+        r.json().get("error", {}).get("code", "") for r in responses if r.status_code == 429
+    ]
+    ok = (
+        expired.status_code == 403
+        and expired_code == "key_expired"
+        and statuses == [200, 429]
+        and all(c == "concurrency_exceeded" for c in conc_codes)
+    )
+    record(
+        "24 key lifecycle (expiry + concurrency)",
+        ok,
+        f"expired={expired.status_code}/{expired_code!r} concurrent={statuses} codes={conc_codes}",
+    )
+
+
+async def check_25_semantic_cache(client: httpx.AsyncClient) -> None:
+    """M2 semantic cache live over a real embeddings upstream (ollama
+    nomic-embed-text): a paraphrased prompt hits the cached answer within the
+    glm4:9b partition; hit counted in gateway_semantic_cache_hits_total."""
+    first = await chat(client, "glm4:9b", "请用一句话介绍故宫")
+    if first.status_code != 200:
+        record("25 semantic cache", False, f"first={first.status_code} body={first.text[:120]}")
+        return
+    first_answer = first.json()["choices"][0]["message"]["content"]
+    second = await chat(client, "glm4:9b", "请你用一句话来介绍一下故宫")
+    served_from_cache = (
+        second.status_code == 200
+        and second.json()["choices"][0]["message"]["content"] == first_answer
+    )
+    metrics_text = (await client.get("/metrics", headers=ADMIN_AUTH)).text
+    hit_counted = any(
+        line.startswith("gateway_semantic_cache_hits_total{") and 'model="glm4:9b"' in line
+        for line in metrics_text.splitlines()
+    )
+    ok = served_from_cache and hit_counted
+    record(
+        "25 semantic cache (real embeddings)",
+        ok,
+        f"paraphrase-served-cached-answer={served_from_cache} metric={hit_counted} "
+        f"answer={first_answer[:30]!r}",
+    )
+
+
+async def check_26_hot_reload(client: httpx.AsyncClient, gateway) -> None:
+    """Hot reload live: a new model route appears after the config file is
+    edited and the gateway materializes the new state (the same path the
+    config watcher polls every 5s)."""
+    config_path = Path(gateway.config_path)
+    original = config_path.read_text(encoding="utf-8")
+    # insert `hot-added` as the first model route
+    modified = original.replace(
+        "models:\n",
+        "models:\n  hot-added:\n    deployments:\n      - provider: ollama\n        model: glm4:9b\n",
+        1,
+    )
+    try:
+        config_path.write_text(modified, encoding="utf-8")
+        reloaded = await gateway.reload_if_changed()
+        response = await client.get("/v1/models", headers={"Authorization": "Bearer sk-e2e-demo-key"})
+        ids = [m["id"] for m in response.json().get("data", [])] if response.status_code == 200 else []
+        served = await chat(client, "hot-added", "回答ok")
+        ok = reloaded and "hot-added" in ids and served.status_code == 200
+        record("26 hot reload adds model", ok, f"reloaded={reloaded} models={ids} served={served.status_code}")
+    finally:
+        config_path.write_text(original, encoding="utf-8")
+
+
+async def chat_with(client: httpx.AsyncClient, headers: dict, content: str) -> httpx.Response:
+    return await client.post(
+        "/v1/chat/completions",
+        headers=headers,
+        json={"model": "glm4:9b", "messages": [{"role": "user", "content": content}]},
+        timeout=320,
     )
 
 
@@ -553,6 +748,11 @@ async def main_async(config_path: str, report_path: str) -> int:
         lambda client: check_19_collector_down(client, collector),
         check_20_prompt_template,
         check_21_canary_split,
+        check_22_admin_key_crud,
+        check_23_budget_hard_limit,
+        check_24_key_lifecycle,
+        check_25_semantic_cache,
+        lambda client: check_26_hot_reload(client, app.state.gateway),
     ]
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://e2e") as client:

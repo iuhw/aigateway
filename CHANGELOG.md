@@ -18,13 +18,21 @@ GA 稳定化版本。自 v0.1 交付：统一接入（OpenAI/Anthropic 双协议
   （含 on_request 请求改写扩展点）、[配置参考](docs/configuration.md)、[升级说明](docs/upgrading.md)。
 - **YAML 向后兼容承诺**（v1 起旧配置永续可用）与语义化版本策略。
 
+### Fixed
+
+- **语义缓存 × 提示词模板交互缺陷**（全面实测发现）：嵌入文本原先包含全部消息，逐请求
+  字节相同的注入 system 提示会把任意提示词对的相似度抬到 ≥0.98（实测），任何阈值都会跨
+  提示词误命中。修复：嵌入文本改为非 system 消息，system 提示并入分区指纹（不同 system
+  绝不共享缓存答案——比修复前更严格）。
+
 ### Verified
 
+- E2E 扩至 **26 项全过**（新增：Admin API CRUD/保护、预算硬限、key 生命周期、
+  语义缓存真实 embeddings 实测、热重载实弹）；
 - soak 60 分钟 @300 RPS（全插件链 + canary 切流 + 模板注入，collector 宕机口径）：
   **116,097 请求零错误**、RSS 斜率 +0.252 MB/min（后半程净增 +1.1 MB）、句柄斜率 +3.10/min；
 - 双臂负载 4/4 SLO（错误率 0%、网关开销 p99 < 10ms、TTFT 附加 p50/p99 达标）；
-- 真实模型 E2E **21/21**（v1.0 代码重跑）；
-- 混沌门槛随全量套件复核（387 passed, 1 skipped）。
+- 混沌门槛随全量套件复核（388 passed, 1 skipped）。
 
 ### Changed
 

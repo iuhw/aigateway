@@ -1,5 +1,14 @@
 # aigateway configuration for the Ollama end-to-end validation.
-# Used by scripts/validate_e2e.py; assumes Ollama serving glm4:9b on 11434.
+# Used by scripts/validate_e2e.py; assumes Ollama serving glm4:9b on 11434,
+# plus `ollama cp glm4:9b glm4:9b-canary` and `ollama pull nomic-embed-text`.
+
+server:
+  # v1.0: admin surface is protected in the E2E (checks 10/16/18/21/22+ send
+  # this key; proves the protected /metrics + /admin/* path live).
+  admin_api_key: admin-e2e-key
+
+pricing:
+  glm4:9b: {input_per_1k: 1.0, output_per_1k: 1.0}   # enables cost + budget checks
 
 providers:
   ollama:
@@ -65,6 +74,13 @@ models:
       retry_backoff_s: 1.0
       cooldown_s: 60
       allowed_fails: 3
+  embed-mdl:
+    # embeddings route for the semantic cache (check 25)
+    deployments:
+      - provider: ollama
+        model: nomic-embed-text
+    policy:
+      timeout_s: 120
 
 plugins:
   auth-plugin:
@@ -127,6 +143,14 @@ plugins:
   usage-report-plugin:
     config:
       retention_hours: 24
+  # ---- M2 semantic cache (validated by check 25 in validate_e2e.py) ----------
+  semantic-cache-plugin:
+    config:
+      embed_model: embed-mdl        # routed to ollama nomic-embed-text
+      # 0.9 measured: paraphrase pair 0.9489 (hit), cross-prompt 0.8586 (no hit)
+      similarity_threshold: 0.9
+      ttl_s: 600
+      max_entries: 256
   # ---- M5 (validated by checks 20-21 in validate_e2e.py) ----------------------
   prompt-template-plugin:
     # Scoped to the glm4 models so the rest of the E2E run is unaffected.

@@ -112,8 +112,11 @@
 11. **per-key 成本指标** `gateway_key_cost_usd_total` 的 `key` 标签基数有上限
     （`server.max_tracked_keys`，默认 100），超限聚合为 `other`。
 12. **语义缓存**（opt-in）：请求文本经网关 embeddings 管道向量化后按 cosine 相似度检索，
-    仅在「模型+采样参数+tools」分区内比较（参数不同绝不命中）；默认阈值 0.95、TTL 600s、
-    命中即计 `gateway_semantic_cache_hits_total`。miss 路径多一次 embed 往返（不可用时直通）；
+    仅在「模型+采样参数+tools+**system 提示指纹**」分区内比较（参数不同绝不命中）；嵌入文本为
+    **非 system 消息**——system 提示（网关模板注入或客户端固定包装）逐请求字节级相同，参与嵌入
+    会把任意提示词对的相似度抬到 ≥0.98（实测），任何可用阈值都会跨提示词误命中；system 身份由
+    分区指纹强制（不同 system 绝不共享缓存答案）。默认阈值 0.95、TTL 600s、命中即计
+    `gateway_semantic_cache_hits_total`。miss 路径多一次 embed 往返（不可用时直通）；
     流式与 embeddings 请求不参与；Redis 后端为暴力 SCAN 检索，命名空间应保持数百条以内
     （`max_entries` 仅约束进程内存储），更大规模需专用向量索引（探索池）。
 13. **PII 脱敏**（opt-in）：变长正则的流式安全依赖 `holdback_chars`（默认 128）回拉切分——
