@@ -3,46 +3,46 @@
   "concurrency": 32,
   "gateway": {
     "non_stream": {
-      "requests": 2668,
+      "requests": 2652,
       "errors": 0,
-      "rps": 88.2,
+      "rps": 87.8,
       "error_rate_pct": 0.0,
-      "latency_p50_s": 0.363,
-      "latency_p99_s": 0.4129,
+      "latency_p50_s": 0.3643,
+      "latency_p99_s": 0.4096,
+      "ttft_p50_s": null,
+      "ttft_p99_s": null
+    },
+    "stream": {
+      "requests": 768,
+      "errors": 0,
+      "rps": 24.7,
+      "error_rate_pct": 0.0,
+      "latency_p50_s": 1.2916,
+      "latency_p99_s": 1.3515,
+      "ttft_p50_s": 0.3429,
+      "ttft_p99_s": 0.3928
+    }
+  },
+  "direct": {
+    "non_stream": {
+      "requests": 2574,
+      "errors": 0,
+      "rps": 84.9,
+      "error_rate_pct": 0.0,
+      "latency_p50_s": 0.3743,
+      "latency_p99_s": 0.4284,
       "ttft_p50_s": null,
       "ttft_p99_s": null
     },
     "stream": {
       "requests": 736,
       "errors": 0,
-      "rps": 24.5,
+      "rps": 24.2,
       "error_rate_pct": 0.0,
-      "latency_p50_s": 1.3061,
-      "latency_p99_s": 1.3894,
-      "ttft_p50_s": 0.3497,
-      "ttft_p99_s": 0.3924
-    }
-  },
-  "direct": {
-    "non_stream": {
-      "requests": 2585,
-      "errors": 0,
-      "rps": 85.5,
-      "error_rate_pct": 0.0,
-      "latency_p50_s": 0.3752,
-      "latency_p99_s": 0.4257,
-      "ttft_p50_s": null,
-      "ttft_p99_s": null
-    },
-    "stream": {
-      "requests": 744,
-      "errors": 0,
-      "rps": 24.0,
-      "error_rate_pct": 0.0,
-      "latency_p50_s": 1.3181,
-      "latency_p99_s": 1.3712,
-      "ttft_p50_s": 0.3584,
-      "ttft_p99_s": 0.4046
+      "latency_p50_s": 1.3223,
+      "latency_p99_s": 1.375,
+      "ttft_p50_s": 0.3674,
+      "ttft_p99_s": 0.4065
     }
   },
   "slo_checks": {
@@ -51,7 +51,7 @@
     "ttft_overhead_p50_lt_5ms": true,
     "ttft_overhead_p99_lt_25ms": true
   },
-  "overhead_p99_s": -0.0128,
-  "ttft_overhead_p50_s": -0.0087,
-  "ttft_overhead_p99_s": -0.0122
+  "overhead_p99_s": -0.0188,
+  "ttft_overhead_p50_s": -0.0245,
+  "ttft_overhead_p99_s": -0.0137
 }
