@@ -6,6 +6,9 @@ server:
   # v1.0: admin surface is protected in the E2E (checks 10/16/18/21/22+ send
   # this key; proves the protected /metrics + /admin/* path live).
   admin_api_key: admin-e2e-key
+  # v1.2: passthrough escape hatch exercised by check 29.
+  passthrough:
+    enabled: true
 
 pricing:
   glm4:9b: {input_per_1k: 1.0, output_per_1k: 1.0}   # enables cost + budget checks

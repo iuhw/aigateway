@@ -16,6 +16,12 @@ server:
   # max_message_chars: 200000
   # max_tracked_keys: 100           # cap distinct key labels in
   #                                 # gateway_key_cost_usd_total (overflow -> "other")
+  # --- passthrough escape hatch (v1.2, default off) ---
+  # Relays raw requests to a model's upstream via /v1/upstream/{model}/{path}:
+  # auth/budget/rate limits/logs/metrics still apply; schema validation,
+  # caches, canary and stream content filters do not. JSON bodies only.
+  # passthrough:
+  #   enabled: true
 
 # ---- cost tracking -------------------------------------------------------
 # Static per-model USD pricing; accumulates gateway_cost_usd_total by model.

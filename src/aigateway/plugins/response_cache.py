@@ -103,6 +103,8 @@ class ResponseCachePlugin(Plugin):
         self._evict_if_needed()
 
     async def on_request(self, ctx: PluginContext) -> None:
+        if ctx.passthrough:  # tunnel traffic is not cacheable (arbitrary endpoints)
+            return
         if ctx.stream and not self.cache_streaming:
             return
         key = cache_key(ctx.model, ctx.payload)

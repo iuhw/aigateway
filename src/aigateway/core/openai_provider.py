@@ -94,6 +94,33 @@ class OpenAICompatibleProvider(Provider):
         )
         return ProviderResult(status=status, body=body, latency_s=latency)
 
+    async def request_raw(
+        self,
+        *,
+        method: str,
+        path: str,
+        query: str = "",
+        body: bytes | None = None,
+        timeout: float,
+    ) -> httpx.Response:
+        """Passthrough tunnel (v1.2): send an arbitrary request to this upstream.
+
+        Returns the streamed httpx.Response — the caller owns it and must drain
+        and `aclose()` it. Client default headers (auth, content-type) apply as
+        for normal calls; the body is forwarded verbatim.
+        """
+        try:
+            request = self._client.build_request(
+                method,
+                path,
+                params=httpx.QueryParams(query) if query else None,
+                content=body,
+                timeout=_timeout(timeout),
+            )
+            return await self._client.send(request, stream=True)
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise UpstreamUnavailable(f"{self.name}: {type(exc).__name__}: {exc}") from exc
+
     async def embed(self, *, model: str, payload: dict[str, Any], timeout: float) -> ProviderResult:
         status, body, latency = await self._post_json("/embeddings", {**payload, "model": model}, timeout)
         return ProviderResult(status=status, body=body, latency_s=latency)

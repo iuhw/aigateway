@@ -105,6 +105,12 @@ class Metrics:
             ("model", "branch"),
             registry=r,
         )
+        self.passthrough_requests_total = Counter(
+            "gateway_passthrough_requests_total",
+            "Requests relayed through the /v1/upstream passthrough tunnel",
+            ("model",),
+            registry=r,
+        )
 
     # -- convenience wrappers -------------------------------------------------
 
@@ -155,6 +161,9 @@ class Metrics:
 
     def inc_canary(self, model: str, branch: str) -> None:
         self.canary_requests_total.labels(model=model, branch=branch).inc()
+
+    def inc_passthrough(self, model: str) -> None:
+        self.passthrough_requests_total.labels(model=model).inc()
 
     def inc_attempt(self, model: str, provider: str, outcome: str) -> None:
         self.upstream_attempts_total.labels(model=model, provider=provider, outcome=outcome).inc()

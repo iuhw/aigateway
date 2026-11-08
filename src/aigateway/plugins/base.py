@@ -55,6 +55,11 @@ class PluginContext:
     #: Original model name when canary routing diverted the request to another
     #: model route; None means the requested model is being served unchanged.
     requested_model: str | None = None
+    #: True on the /v1/upstream passthrough tunnel: raw bodies that are not
+    #: chat-completions payloads. Cache/template/re-review plugins check this
+    #: flag and stand aside; identity plugins (auth, rate limit, logging) and
+    #: text scanners still run.
+    passthrough: bool = False
     #: Populated after routing; used by logging.
     route: ModelRoute | None = None
     deployment: Deployment | None = None

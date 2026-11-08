@@ -43,6 +43,9 @@ via ASGITransport but a REAL upstream Ollama server):
   27 vision (OpenAI entry): image part to a real vision model (moondream
      identifies the solid color of a generated PNG)
   28 vision (Anthropic entry): Anthropic base64 image source via /v1/messages
+  29 passthrough tunnel (v1.2): raw request relayed via /v1/upstream/{model}/
+     {path} (upstream model name, template injection bypassed, 401 unauth,
+     gateway_passthrough_requests_total)
 
 The webhook-review check needs a review service: this script starts a tiny
 local allow-stub on 127.0.0.1:11439 (matching gateway.ollama.yaml) for the
@@ -53,7 +56,8 @@ and the `glm4:9b-canary` ollama tag (ollama cp glm4:9b glm4:9b-canary).
 Checks 22-26 need server.admin_api_key + pricing in gateway.ollama.yaml,
 the `nomic-embed-text` ollama model (semantic cache), and an admin key
 (header constant ADMIN_AUTH = admin-e2e-key). Checks 27-28 need the
-`moondream` ollama model (ollama pull moondream, vision-mdl route).
+`moondream` ollama model (ollama pull moondream, vision-mdl route). Check 29 needs
+server.passthrough.enabled=true in gateway.ollama.yaml.
 """
 
 from __future__ import annotations
@@ -651,13 +655,36 @@ async def chat_with(client: httpx.AsyncClient, headers: dict, content: str) -> h
     )
 
 
+def _unload_ollama_models(*names: str) -> None:
+    """Force-unload ollama models before the vision checks.
+
+    On a 12GB card, glm4:9b (6GB) + nomic-embed-text + moondream co-resident
+    degrades moondream to empty/garbled output (VRAM contention; the loaded
+    runner stays broken even after the others unload). Stopping everything so
+    moondream loads fresh and solo restores correct answers (measured:
+    co-load 0/7 contain the color, solo-fresh correct). The bundled llama.cpp
+    additionally degrades after a few image inferences on one runner load
+    (empty/garbled), so checks reload moondream per attempt."""
+    import subprocess
+
+    for name in names:
+        try:
+            subprocess.run(["ollama", "stop", name], capture_output=True, timeout=30)
+        except Exception:  # noqa: BLE001 - best effort; solo load may still work
+            pass
+    time.sleep(2)
+
+
 async def check_27_vision_openai_entry(client: httpx.AsyncClient) -> None:
     """v1.1: image input through the OpenAI entry to a real vision model
     (moondream) — the model must identify the solid color of an 8x8 PNG.
     moondream occasionally emits a blank/1-token answer, so up to 3 attempts."""
+    _unload_ollama_models("glm4:9b", "nomic-embed-text", "moondream")
     response = None
     content = ""
     for _attempt in range(3):
+        if _attempt:  # reloaded runner answers sanely on its first calls only
+            _unload_ollama_models("moondream")
         response = await client.post(
             "/v1/chat/completions",
             headers={"Authorization": "Bearer sk-e2e-demo-key"},
@@ -696,9 +723,15 @@ async def check_27_vision_openai_entry(client: httpx.AsyncClient) -> None:
 async def check_28_vision_anthropic_entry(client: httpx.AsyncClient) -> None:
     """v1.1: the same image through /v1/messages (Anthropic base64 image
     source translated to an OpenAI image part upstream); up to 3 attempts."""
+    # ollama 0.40.10/llama.cpp degrades moondream after its first image
+    # inference(s) on a loaded runner (empty/garbled output); a fresh solo
+    # load answers sanely — reload before the check (see _unload_ollama_models).
+    _unload_ollama_models("moondream")
     response = None
     content = ""
     for _attempt in range(3):
+        if _attempt:  # same warm-runner degradation as check-27
+            _unload_ollama_models("moondream")
         response = await client.post(
             "/v1/messages",
             headers={"Authorization": "Bearer sk-e2e-demo-key"},
@@ -732,6 +765,46 @@ async def check_28_vision_anthropic_entry(client: httpx.AsyncClient) -> None:
         "28 vision (Anthropic entry)",
         ok,
         f"status={response.status_code if response else 'n/a'} answer={content[:60]!r}",
+    )
+
+
+async def check_29_passthrough(client: httpx.AsyncClient) -> None:
+    """v1.2: a raw request tunneled through /v1/upstream/{model}/{path}: upstream
+    serves it with the rewritten upstream model name, the tunnel bypasses
+    prompt-template injection (no [[E2E-M5- signature), unauthenticated calls
+    are still 401, and gateway_passthrough_requests_total counts the request."""
+    denied = await client.post(
+        "/v1/upstream/glm4:9b/chat/completions",
+        json={"model": "glm4:9b", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    response = await client.post(
+        "/v1/upstream/glm4:9b/chat/completions",
+        headers={"Authorization": "Bearer sk-e2e-demo-key"},
+        json={
+            "model": "glm4:9b",
+            "messages": [{"role": "user", "content": "Reply with the single word: pong"}],
+            "stream": False,
+        },
+        timeout=320,
+    )
+    body = response.json() if response.status_code == 200 else {}
+    content = (body.get("choices") or [{}])[0].get("message", {}).get("content", "")
+    metrics = await client.get("/metrics", headers=ADMIN_AUTH)
+    counted = 'gateway_passthrough_requests_total{model="glm4:9b"}' in metrics.text
+    template_bypassed = "[[E2E-M5-" not in content
+    ok = (
+        denied.status_code == 401
+        and response.status_code == 200
+        and body.get("model") == "glm4:9b"
+        and content.strip() != ""
+        and template_bypassed
+        and counted
+    )
+    record(
+        "29 passthrough tunnel",
+        ok,
+        f"auth={denied.status_code} status={response.status_code} model={body.get('model')!r} "
+        f"answer={content[:40]!r} template_bypassed={template_bypassed} metric={counted}",
     )
 
 
@@ -847,6 +920,7 @@ async def main_async(config_path: str, report_path: str) -> int:
         lambda client: check_26_hot_reload(client, app.state.gateway),
         check_27_vision_openai_entry,
         check_28_vision_anthropic_entry,
+        check_29_passthrough,
     ]
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://e2e") as client:

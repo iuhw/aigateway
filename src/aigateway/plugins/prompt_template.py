@@ -118,8 +118,8 @@ class PromptTemplatePlugin(Plugin):
             )
 
     async def on_request(self, ctx: PluginContext) -> None:
-        if not self.rules:
-            return
+        if not self.rules or ctx.passthrough:
+            return  # tunnel bodies are not chat payloads; templates do not apply
         messages = ctx.payload.get("messages")
         if not isinstance(messages, list):
             return

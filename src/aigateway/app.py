@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -10,11 +11,20 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
+
 from aigateway.config import ConfigWatcher, GatewayConfig
-from aigateway.core.dispatcher import Dispatcher
-from aigateway.core.provider import Provider
+from aigateway.core.dispatcher import RETRYABLE_STATUSES, Dispatcher
+from aigateway.core.provider import Provider, UpstreamUnavailable
 from aigateway.core.router import Router
-from aigateway.errors import GatewayError, NotFoundError, RateLimitError, UpstreamError
+from aigateway.errors import (
+    AllDeploymentsFailedError,
+    BadRequestError,
+    GatewayError,
+    NotFoundError,
+    RateLimitError,
+    UpstreamError,
+)
 from aigateway.observability.metrics import Metrics
 from aigateway.plugins.base import PluginChain, PluginContext
 from aigateway.schemas import (
@@ -32,6 +42,21 @@ from aigateway.schemas import (
 from aigateway.tokenizers import TokenEstimator, build_tokenizer
 
 logger = logging.getLogger("aigateway.app")
+
+_PASSTHROUGH_RELAY_HEADERS = ("content-type", "content-disposition", "x-request-id")
+
+
+@dataclass
+class PassthroughResult:
+    """Raw upstream response relayed by the /v1/upstream tunnel (v1.2).
+
+    Either `body` (buffered bytes) or `stream` (live byte iterator the caller
+    must fully consume) is set; `headers` is the relay-safe header subset."""
+
+    status: int
+    headers: dict[str, str]
+    body: bytes | None = None
+    stream: AsyncIterator[bytes] | None = None
 
 
 @dataclass
@@ -457,6 +482,207 @@ class GatewayApp:
             raise
         finally:
             self._release_concurrency(ctx)
+
+    # -- passthrough tunnel ----------------------------------------------------------
+
+    def _passthrough_enabled(self) -> bool:
+        section = (self._server_limits() or {}).get("passthrough")
+        return isinstance(section, dict) and bool(section.get("enabled"))
+
+    async def passthrough(
+        self,
+        *,
+        model_name: str,
+        subpath: str,
+        query: str = "",
+        method: str = "POST",
+        body_bytes: bytes | None = None,
+        body_dict: Any = None,
+        headers: dict[str, str] | None = None,
+        client_host: str = "",
+    ) -> PassthroughResult:
+        """Relay a raw request to the model's upstream (v1.2 escape hatch).
+
+        Tunnel semantics: the upstream path is appended verbatim to the
+        deployment's base_url and its status/body stream back unmodified. The
+        gateway still provides identity governance (virtual-key auth, model
+        allowlist, budgets, rate limiting, concurrency, request logs, metrics)
+        but skips schema validation, caches, canary and stream content hooks.
+        JSON bodies get their `model` field rewritten to the upstream model so
+        virtual model names keep working. Transport failures raise
+        UpstreamUnavailable (502 envelope) — upstream 4xx/5xx relay as-is.
+        """
+        started = time.perf_counter()
+        ctx = PluginContext(
+            request_id=uuid.uuid4().hex,
+            model=model_name,
+            payload=body_dict if isinstance(body_dict, dict) else {},
+            stream=False,
+            headers=dict(headers or {}),
+            client_host=client_host,
+        )
+        ctx.passthrough = True
+        streaming = False
+
+        try:
+            if not self._passthrough_enabled():
+                raise NotFoundError("passthrough is not enabled on this gateway")
+            route = self.state.router.route(model_name)
+            if route is None:
+                raise NotFoundError(f"model {model_name!r} is not configured")
+
+            await self.state.plugins.run_request(ctx)
+            self._acquire_concurrency(ctx)
+
+            deployment = self.state.router.pick(route, exclude=set())
+            if deployment is None:
+                raise AllDeploymentsFailedError(f"no healthy deployment for model {model_name!r}")
+            provider = self.state.providers.get(deployment.provider)
+            if provider is None or not hasattr(provider, "request_raw"):
+                raise BadRequestError(
+                    f"provider {deployment.provider!r} of model {model_name!r} "
+                    "does not support passthrough (openai/anthropic upstreams only)"
+                )
+
+            body_out = body_bytes
+            if isinstance(body_dict, dict) and isinstance(body_dict.get("model"), str):
+                body_out = json.dumps({**body_dict, "model": deployment.model}, ensure_ascii=False).encode()
+
+            ctx.route = route
+            ctx.deployment = deployment
+            ctx.attempts = 1
+            ctx.upstream_started_at = time.perf_counter()
+            try:
+                response = await provider.request_raw(
+                    method=method,
+                    path=subpath,
+                    query=query,
+                    body=body_out,
+                    timeout=route.policy.timeout_s,
+                )
+            except UpstreamUnavailable:
+                self.state.router.report_failure(deployment, route)
+                raise
+            latency = time.perf_counter() - started
+
+            relay_headers = {
+                name: value
+                for name, value in response.headers.items()
+                if name.lower() in _PASSTHROUGH_RELAY_HEADERS
+            }
+            content_type = response.headers.get("content-type", "")
+
+            if "text/event-stream" in content_type:
+                # the relay generator owns concurrency release for this path —
+                # it is still in flight when this method returns
+                streaming = True
+                return PassthroughResult(
+                    status=response.status_code,
+                    headers=relay_headers,
+                    stream=self._passthrough_stream(ctx, response, route, started),
+                )
+
+            try:
+                data = await response.aread()
+            finally:
+                await response.aclose()
+            ctx.upstream_ended_at = time.perf_counter()
+            ctx.latency_s = time.perf_counter() - started
+            ctx.status_code = response.status_code
+            if response.status_code < 400:
+                self.state.router.report_success(deployment, latency)
+            elif response.status_code in RETRYABLE_STATUSES:
+                # only upstream-side failures cool the deployment down; client
+                # errors on tunnel paths are the caller's, not the route's
+                self.state.router.report_failure(deployment, route)
+
+            if response.status_code < 400:
+                self._passthrough_settle(ctx, data)
+                try:
+                    await self.state.plugins.run_response(ctx)
+                except GatewayError:
+                    ctx.response = None
+                    raise
+            self.metrics.inc_passthrough(model_name)
+            self._passthrough_metrics(ctx)
+            return PassthroughResult(
+                status=response.status_code, headers=relay_headers, body=data
+            )
+        except GatewayError as exc:
+            self._finish_error(ctx, exc, started)
+            raise
+        finally:
+            if not streaming:
+                self._release_concurrency(ctx)
+
+    def _passthrough_settle(self, ctx: PluginContext, data: bytes) -> None:
+        """Usage/cost settlement for a buffered passthrough response: usage is
+        recorded only when the upstream body reports it (bodies the gateway
+        cannot parse contribute nothing)."""
+        try:
+            parsed = json.loads(data)
+        except (json.JSONDecodeError, ValueError):
+            return
+        if not isinstance(parsed, dict):
+            return
+        ctx.response = parsed
+        usage = parsed.get("usage")
+        if isinstance(usage, dict) and usage.get("total_tokens") is not None:
+            ctx.prompt_tokens = usage.get("prompt_tokens")
+            ctx.completion_tokens = usage.get("completion_tokens") or 0
+            ctx.cache_read_tokens, ctx.cache_write_tokens = cache_tokens_of(usage)
+            ctx.usage_reported = True
+        self._record_cost(ctx)
+
+    def _passthrough_metrics(self, ctx: PluginContext) -> None:
+        """Metrics finish for the tunnel: request/latency/tokens only — cache
+        hit-rate series are not applicable to passthrough traffic."""
+        provider = ctx.deployment.provider if ctx.deployment else "none"
+        status = ctx.status_code or 200
+        self.metrics.observe_request(ctx.model, provider, status, ctx.latency_s or 0.0)
+        if ctx.usage_reported:
+            self.metrics.inc_tokens(ctx.model, provider, ctx.prompt_tokens or 0, ctx.completion_tokens or 0)
+
+    async def _passthrough_stream(
+        self, ctx: PluginContext, response: httpx.Response, route, started: float
+    ) -> AsyncIterator[bytes]:
+        """Relay an upstream SSE/byte stream verbatim; cleanup mirrors
+        _chat_streaming (concurrency release, metrics, error hooks)."""
+        error: GatewayError | None = None
+        try:
+            async for chunk in response.aiter_bytes():
+                yield chunk
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            error = UpstreamError(f"passthrough stream failed: {exc}")
+            ctx.error = error
+        except GatewayError as exc:  # noqa: BLE001 - never leak a raw exception to the client
+            error = exc
+            ctx.error = error
+        finally:
+            await response.aclose()
+            self._release_concurrency(ctx)
+            ctx.upstream_ended_at = time.perf_counter()
+            ctx.latency_s = time.perf_counter() - started
+            if error is not None:
+                if route is not None and ctx.deployment is not None:
+                    self.state.router.report_failure(ctx.deployment, route)
+                self._finish_error(ctx, error, started)
+            else:
+                ctx.status_code = response.status_code
+                if ctx.deployment is not None:
+                    self.state.router.report_success(
+                        ctx.deployment, (ctx.upstream_ended_at or 0) - (ctx.upstream_started_at or 0)
+                    )
+                self.metrics.inc_passthrough(ctx.model)
+                self._passthrough_metrics(ctx)
+                try:
+                    await self.state.plugins.run_stream_end(ctx)
+                except GatewayError:
+                    # post-delivery rejection: chunks are already gone; log loudly
+                    logger.error(
+                        "passthrough stream %s rejected by a plugin after delivery",
+                        ctx.request_id,
+                    )
 
     # -- non-streaming -----------------------------------------------------------
 

@@ -76,6 +76,13 @@ def check_main(argv: list[str]) -> int:
         problems.append(
             "WARNING: shared_state.backend=memory — limits are per-process; use redis for N replicas"
         )
+    passthrough = server.get("passthrough")
+    if isinstance(passthrough, dict) and passthrough.get("enabled"):
+        problems.append(
+            "WARNING: server.passthrough.enabled=true — /v1/upstream relays raw requests "
+            "to upstreams (auth/budget/rate limits apply; schema validation, caches and "
+            "stream content filters do not)"
+        )
 
     if chain is not None:
         print(f"plugins ({len(chain.plugins)}):")

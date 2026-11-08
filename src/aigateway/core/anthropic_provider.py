@@ -23,7 +23,7 @@ from aigateway.core.provider import (
     UpstreamStreamError,
     UpstreamUnavailable,
 )
-from aigateway.schemas import extract_images, message_text
+from aigateway.schemas import extract_images, image_from_part, message_text
 
 ANTHROPIC_STOP_REASON_TO_OPENAI = {
     "end_turn": "stop",
@@ -37,11 +37,22 @@ DEFAULT_BASE_URL = "https://api.anthropic.com"
 DEFAULT_API_VERSION = "2023-06-01"
 
 
+def _marker_of(value: Any) -> dict[str, Any] | None:
+    """`cache_control` marker of a translated part/tool-call (None unless dict)."""
+    return value if isinstance(value, dict) else None
+
+
 def to_anthropic_request(
     payload: dict[str, Any], *, default_max_tokens: int = 4096
 ) -> dict[str, Any]:
-    """OpenAI chat-completions payload -> Anthropic Messages request body."""
-    system_parts: list[str] = []
+    """OpenAI chat-completions payload -> Anthropic Messages request body.
+
+    `cache_control` markers carried by the normalized form (content parts,
+    tool-call entries, tool messages, tool definitions) are written back onto
+    the corresponding Anthropic blocks so prompt-caching hints survive the
+    round trip; marker-free messages keep the historical shapes.
+    """
+    system_segments: list[list[tuple[str, dict[str, Any] | None]]] = []
     anthropic_messages: list[dict[str, Any]] = []
 
     def _append(role: str, content: list[dict[str, Any]]) -> None:
@@ -50,14 +61,26 @@ def to_anthropic_request(
     for message in payload.get("messages") or []:
         role = message.get("role")
         if role == "system":
-            system_parts.append(message_text(message))
+            content = message.get("content")
+            segments: list[tuple[str, dict[str, Any] | None]] = []
+            if isinstance(content, list):
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    segments.append((str(part.get("text", "")), _marker_of(part.get("cache_control"))))
+            else:
+                segments.append((message_text(message), None))
+            system_segments.append(segments)
             continue
         if role == "tool":
-            block = {
+            block: dict[str, Any] = {
                 "type": "tool_result",
                 "tool_use_id": str(message.get("tool_call_id") or ""),
                 "content": message.get("content") or "",
             }
+            marker = _marker_of(message.get("cache_control"))
+            if marker:
+                block["cache_control"] = marker
             # Consecutive tool results belong to one user turn in Anthropic.
             if anthropic_messages and anthropic_messages[-1]["role"] == "user":
                 last_blocks = anthropic_messages[-1]["content"]
@@ -68,10 +91,22 @@ def to_anthropic_request(
             continue
         if role == "assistant":
             blocks: list[dict[str, Any]] = []
-            text = message.get("content")
-            if text:
+            content = message.get("content")
+            if isinstance(content, list):  # cache-marked parts (or mixed text parts)
+                for part in content:
+                    if not isinstance(part, dict) or part.get("type") != "text":
+                        continue
+                    text = str(part.get("text", ""))
+                    if not text:
+                        continue
+                    text_block: dict[str, Any] = {"type": "text", "text": text}
+                    marker = _marker_of(part.get("cache_control"))
+                    if marker:
+                        text_block["cache_control"] = marker
+                    blocks.append(text_block)
+            elif content:
                 blocks.append(
-                    {"type": "text", "text": text if isinstance(text, str) else message_text(message)}
+                    {"type": "text", "text": content if isinstance(content, str) else message_text(message)}
                 )
             for call in message.get("tool_calls") or []:
                 function = call.get("function") or {}
@@ -79,44 +114,88 @@ def to_anthropic_request(
                     arguments = json.loads(function.get("arguments") or "{}")
                 except json.JSONDecodeError:
                     arguments = {}
-                blocks.append(
-                    {
-                        "type": "tool_use",
-                        "id": str(call.get("id") or ""),
-                        "name": str(function.get("name") or ""),
-                        "input": arguments if isinstance(arguments, dict) else {},
-                    }
-                )
+                tool_block: dict[str, Any] = {
+                    "type": "tool_use",
+                    "id": str(call.get("id") or ""),
+                    "name": str(function.get("name") or ""),
+                    "input": arguments if isinstance(arguments, dict) else {},
+                }
+                marker = _marker_of(call.get("cache_control"))
+                if marker:
+                    tool_block["cache_control"] = marker
+                blocks.append(tool_block)
             _append("assistant", blocks)
             continue
         # user turn: text plus image blocks (base64 sources; https URLs pass
         # through as Anthropic url sources — the upstream fetches, not us).
+        # Parts are walked individually so cache markers stay on their blocks.
         user_blocks: list[dict[str, Any]] = []
-        user_text = message_text(message)
-        if user_text:
-            user_blocks.append({"type": "text", "text": user_text})
-        for image in extract_images(message):
-            if "data" in image:
-                user_blocks.append(
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": image["mime_type"],
-                            "data": image["data"],
-                        },
-                    }
-                )
-            else:
-                user_blocks.append(
-                    {"type": "image", "source": {"type": "url", "url": image["url"]}}
-                )
+        content = message.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                marker = _marker_of(part.get("cache_control"))
+                if part.get("type") == "text":
+                    text = str(part.get("text", ""))
+                    if text:
+                        text_block: dict[str, Any] = {"type": "text", "text": text}
+                        if marker:
+                            text_block["cache_control"] = marker
+                        user_blocks.append(text_block)
+                elif part.get("type") == "image_url":
+                    image = image_from_part(part, "content")
+                    image_block: dict[str, Any]
+                    if "data" in image:
+                        image_block = {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": image["mime_type"],
+                                "data": image["data"],
+                            },
+                        }
+                    else:
+                        image_block = {"type": "image", "source": {"type": "url", "url": image["url"]}}
+                    if marker:
+                        image_block["cache_control"] = marker
+                    user_blocks.append(image_block)
+        else:
+            user_text = message_text(message)
+            if user_text:
+                user_blocks.append({"type": "text", "text": user_text})
+            for image in extract_images(message):
+                if "data" in image:
+                    user_blocks.append(
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": image["mime_type"],
+                                "data": image["data"],
+                            },
+                        }
+                    )
+                else:
+                    user_blocks.append(
+                        {"type": "image", "source": {"type": "url", "url": image["url"]}}
+                    )
         _append("user", user_blocks)
 
     fallback = [{"role": "user", "content": [{"type": "text", "text": ""}]}]
     body: dict[str, Any] = {"messages": anthropic_messages or fallback}
-    if system_parts:
-        body["system"] = "\n".join(system_parts)
+    flat_segments = [segment for segments in system_segments for segment in segments]
+    if flat_segments:
+        if any(marker for _, marker in flat_segments):
+            # blocks form, preserving per-segment cache markers
+            body["system"] = [
+                {"type": "text", "text": text, **({"cache_control": marker} if marker else {})}
+                for text, marker in flat_segments
+            ]
+        else:
+            body["system"] = "\n".join(
+                "".join(text for text, _ in segments) for segments in system_segments
+            )
     body["max_tokens"] = int(payload.get("max_tokens") or default_max_tokens)
     for key in ("temperature", "top_p"):
         if payload.get(key) is not None:
@@ -125,16 +204,18 @@ def to_anthropic_request(
         body["stop_sequences"] = payload["stop"]
     tools = payload.get("tools")
     if tools:
-        body["tools"] = [
-            {
+        body["tools"] = []
+        for tool in tools:
+            function = (tool.get("function") or {}) if tool.get("type") == "function" else tool
+            tool_entry: dict[str, Any] = {
                 "name": function.get("name", ""),
                 "description": function.get("description", ""),
                 "input_schema": function.get("parameters") or {"type": "object", "properties": {}},
             }
-            for function in (
-                (tool.get("function") or {}) if tool.get("type") == "function" else tool for tool in tools
-            )
-        ]
+            marker = _marker_of(tool.get("cache_control"))
+            if marker:
+                tool_entry["cache_control"] = marker
+            body["tools"].append(tool_entry)
     tool_choice = payload.get("tool_choice")
     if tool_choice == "auto":
         body["tool_choice"] = {"type": "auto"}
@@ -377,6 +458,32 @@ class AnthropicProvider(Provider):
         if response.status_code < 400:
             parsed = from_anthropic_response(parsed, model=model)
         return ProviderResult(status=response.status_code, body=parsed, latency_s=latency)
+
+    async def request_raw(
+        self,
+        *,
+        method: str,
+        path: str,
+        query: str = "",
+        body: bytes | None = None,
+        timeout: float,
+    ) -> httpx.Response:
+        """Passthrough tunnel (v1.2): raw request to this Anthropic upstream.
+
+        Same contract as `OpenAICompatibleProvider.request_raw`: the caller owns
+        the streamed response and must drain and close it. The path is appended
+        verbatim to the configured base_url (e.g. `v1/messages/batches`)."""
+        try:
+            request = self._client.build_request(
+                method,
+                path,
+                params=httpx.QueryParams(query) if query else None,
+                content=body,
+                timeout=timeout,
+            )
+            return await self._client.send(request, stream=True)
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise UpstreamUnavailable(f"{self.name}: {type(exc).__name__}: {exc}") from exc
 
     async def stream(
         self, *, model: str, payload: dict[str, Any], timeout: float

@@ -180,6 +180,34 @@ def request_text(payload: dict[str, Any]) -> str:
 _DATA_URI_PREFIX = "data:"
 
 
+def image_from_part(part: Any, where: str) -> dict[str, str]:
+    """Normalized image reference from one OpenAI `image_url` content part.
+
+    ``{"mime_type", "data"}`` for base64 data URIs, ``{"url"}`` for http(s)
+    URLs. Raises BadRequestError on malformed parts — the single validation
+    point shared by `extract_images` and the native adapters.
+    """
+    image_url = part.get("image_url")
+    url = image_url.get("url") if isinstance(image_url, dict) else image_url
+    if not isinstance(url, str) or not url.strip():
+        raise BadRequestError(
+            f"{where}: image_url requires a 'url' string (data URI or https URL)"
+        )
+    url = url.strip()
+    if url.startswith(_DATA_URI_PREFIX):
+        header, _, data = url.partition(",")
+        media_type = header[len(_DATA_URI_PREFIX) :].split(";", 1)[0].strip()
+        if not data or not media_type.startswith("image/"):
+            raise BadRequestError(
+                f"{where}: image data URI must look like "
+                "'data:image/png;base64,<data>' (got media type {media_type!r})"
+            )
+        return {"mime_type": media_type, "data": data}
+    if url.startswith(("http://", "https://")):
+        return {"url": url}
+    raise BadRequestError(f"{where}: image url must be a data URI (base64) or an http(s) URL")
+
+
 def extract_images(message: dict[str, Any]) -> list[dict[str, str]]:
     """Normalized image references from one message's content parts.
 
@@ -195,28 +223,7 @@ def extract_images(message: dict[str, Any]) -> list[dict[str, str]]:
     for i, part in enumerate(content):
         if not isinstance(part, dict) or part.get("type") != "image_url":
             continue
-        image_url = part.get("image_url")
-        url = image_url.get("url") if isinstance(image_url, dict) else image_url
-        if not isinstance(url, str) or not url.strip():
-            raise BadRequestError(
-                f"content[{i}]: image_url requires a 'url' string (data URI or https URL)"
-            )
-        url = url.strip()
-        if url.startswith(_DATA_URI_PREFIX):
-            header, _, data = url.partition(",")
-            media_type = header[len(_DATA_URI_PREFIX) :].split(";", 1)[0].strip()
-            if not data or not media_type.startswith("image/"):
-                raise BadRequestError(
-                    f"content[{i}]: image data URI must look like "
-                    "'data:image/png;base64,<data>' (got media type {media_type!r})"
-                )
-            images.append({"mime_type": media_type, "data": data})
-        elif url.startswith(("http://", "https://")):
-            images.append({"url": url})
-        else:
-            raise BadRequestError(
-                f"content[{i}]: image url must be a data URI (base64) or an http(s) URL"
-            )
+        images.append(image_from_part(part, f"content[{i}]"))
     return images
 
 

@@ -195,8 +195,8 @@ class SemanticCachePlugin(Plugin):
     # -- hooks -----------------------------------------------------------------
 
     async def on_request(self, ctx: PluginContext) -> None:
-        if not self.enabled or ctx.stream or self.embed_fn is None:
-            return
+        if not self.enabled or ctx.stream or self.embed_fn is None or ctx.passthrough:
+            return  # tunnel traffic is out of scope (arbitrary endpoints)
         if ctx.payload.get("input") is not None:  # embeddings requests are out of scope
             return
         text = messages_text(ctx.payload)

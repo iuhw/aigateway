@@ -11,9 +11,13 @@ Supported: system (string/blocks), text content blocks, **image content blocks
 stop_sequences, temperature/top_p/max_tokens, streaming (message_start /
 content_block_* / message_delta / message_stop events), and tools —
 definitions, tool_choice, tool_use / tool_result message blocks, and streamed
-tool-call arguments (input_json_delta events). Not supported: citations and
-image blocks outside user messages (tool_result images, assistant images) —
-rejected with a clear error rather than silently mangled.
+tool-call arguments (input_json_delta events). `cache_control` markers (Anthropic
+prompt caching) are carried through the translation on text/image/tool blocks,
+system blocks, and tool definitions — a marker-bearing message keeps its block
+structure so the marker stays attached to the right block (marker-free messages
+keep the historical string form). Not supported: citations and image blocks
+outside user messages (tool_result images, assistant images) — rejected with a
+clear error rather than silently mangled.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from aigateway.errors import BadRequestError
+from aigateway.schemas import message_text
 from aigateway.tokenizers import TokenEstimator, estimate_default
 
 _STOP_REASON_MAP = {
@@ -59,6 +64,22 @@ _GATEWAY_CODE_TO_ANTHROPIC_ERROR_TYPE = {
     "upstream_error": "api_error",
     "upstream_unavailable": "api_error",
 }
+
+
+def _cache_control(block: dict[str, Any], where: str) -> dict[str, Any] | None:
+    """Validated `cache_control` marker of a content/tool block (None if absent).
+
+    The marker dict is passed through verbatim (Anthropic owns the schema, e.g.
+    ephemeral with optional ttl); only the object shape is enforced here so a
+    malformed marker fails fast instead of being silently dropped — same
+    single-validation-point spirit as `schemas.extract_images`.
+    """
+    marker = block.get("cache_control")
+    if marker is None:
+        return None
+    if not isinstance(marker, dict):
+        raise BadRequestError(f"{where}: 'cache_control' must be an object")
+    return marker
 
 
 def _text_from_content(content: Any, where: str) -> str:
@@ -122,16 +143,18 @@ def _openai_tools(tools: Any) -> list[dict[str, Any]]:
         schema = tool.get("input_schema")
         if schema is not None and not isinstance(schema, dict):
             raise BadRequestError(f"tools[{i}]: 'input_schema' must be an object")
-        openai_tools.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": str(tool["name"]),
-                    "description": str(tool.get("description") or ""),
-                    "parameters": schema or {"type": "object", "properties": {}},
-                },
-            }
-        )
+        entry: dict[str, Any] = {
+            "type": "function",
+            "function": {
+                "name": str(tool["name"]),
+                "description": str(tool.get("description") or ""),
+                "parameters": schema or {"type": "object", "properties": {}},
+            },
+        }
+        marker = _cache_control(tool, f"tools[{i}]")
+        if marker is not None:
+            entry["cache_control"] = marker
+        openai_tools.append(entry)
     return openai_tools
 
 
@@ -173,22 +196,38 @@ def _translate_messages(anthropic_messages: Any) -> list[dict[str, Any]]:
 
         text_parts: list[str] = []
         tool_calls: list[dict[str, Any]] = []
-        content_parts: list[dict[str, Any]] | None = None  # multimodal list once an image appears
+        content_parts: list[dict[str, Any]] | None = None  # parts form once an image or cache marker appears
         for block in blocks:
             if not isinstance(block, dict):
                 raise BadRequestError(f"messages[{i}]: content blocks must be objects")
             block_type = block.get("type")
             if block_type == "text":
-                text_parts.append(str(block.get("text", "")))
-                if content_parts is not None:
-                    content_parts.append({"type": "text", "text": str(block.get("text", ""))})
+                text = str(block.get("text", ""))
+                marker = _cache_control(block, f"messages[{i}]")
+                if marker is not None:
+                    # a cache boundary forces parts form: flush pending text so
+                    # the marker stays attached to its own block
+                    if content_parts is None:
+                        content_parts = []
+                    if text_parts:
+                        content_parts.append({"type": "text", "text": "".join(text_parts)})
+                        text_parts = []
+                    content_parts.append({"type": "text", "text": text, "cache_control": marker})
+                else:
+                    text_parts.append(text)
+                    if content_parts is not None:
+                        content_parts.append({"type": "text", "text": text})
             elif block_type == "image" and role == "user":
                 if content_parts is None:
                     content_parts = []
                     if text_parts:
                         content_parts.append({"type": "text", "text": "".join(text_parts)})
                         text_parts = []
-                content_parts.append(_openai_image_part(block.get("source"), f"messages[{i}]"))
+                part = _openai_image_part(block.get("source"), f"messages[{i}]")
+                marker = _cache_control(block, f"messages[{i}]")
+                if marker is not None:
+                    part["cache_control"] = marker
+                content_parts.append(part)
             elif block_type == "image":
                 raise BadRequestError(f"messages[{i}]: image blocks are input-only (user messages)")
             elif block_type == "tool_use" and role == "assistant":
@@ -199,26 +238,30 @@ def _translate_messages(anthropic_messages: Any) -> list[dict[str, Any]]:
                     tool_input = {}
                 if not isinstance(tool_input, dict):
                     raise BadRequestError(f"messages[{i}]: tool_use 'input' must be an object")
-                tool_calls.append(
-                    {
-                        "id": str(block["id"]),
-                        "type": "function",
-                        "function": {
-                            "name": str(block["name"]),
-                            "arguments": json.dumps(tool_input, ensure_ascii=False),
-                        },
-                    }
-                )
+                call: dict[str, Any] = {
+                    "id": str(block["id"]),
+                    "type": "function",
+                    "function": {
+                        "name": str(block["name"]),
+                        "arguments": json.dumps(tool_input, ensure_ascii=False),
+                    },
+                }
+                marker = _cache_control(block, f"messages[{i}]")
+                if marker is not None:
+                    call["cache_control"] = marker
+                tool_calls.append(call)
             elif block_type == "tool_result" and role == "user":
                 if not block.get("tool_use_id"):
                     raise BadRequestError(f"messages[{i}]: tool_result requires 'tool_use_id'")
-                openai_messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": str(block["tool_use_id"]),
-                        "content": _text_from_content(block.get("content"), f"messages[{i}] tool_result"),
-                    }
-                )
+                tool_message: dict[str, Any] = {
+                    "role": "tool",
+                    "tool_call_id": str(block["tool_use_id"]),
+                    "content": _text_from_content(block.get("content"), f"messages[{i}] tool_result"),
+                }
+                marker = _cache_control(block, f"messages[{i}]")
+                if marker is not None:
+                    tool_message["cache_control"] = marker
+                openai_messages.append(tool_message)
             else:
                 raise BadRequestError(
                     f"messages[{i}]: unsupported content block {block_type!r} for role {role!r}"
@@ -226,13 +269,16 @@ def _translate_messages(anthropic_messages: Any) -> list[dict[str, Any]]:
 
         text = "".join(text_parts)
         if role == "assistant":
-            entry: dict[str, Any] = {"role": "assistant", "content": text if text else None}
+            entry: dict[str, Any] = {
+                "role": "assistant",
+                "content": content_parts or (text if text else None),
+            }
             if tool_calls:
                 entry["tool_calls"] = tool_calls
             openai_messages.append(entry)
         elif content_parts is not None:
-            # multimodal user turn: post-image text was appended in-loop,
-            # pre-image text was flushed into parts when the image appeared
+            # multimodal / cache-marked user turn: post-image text was appended
+            # in-loop, pre-image text was flushed into parts when it appeared
             openai_messages.append({"role": "user", "content": content_parts})
         elif text or not blocks:  # user turn keeps its text (tool results already emitted)
             openai_messages.append({"role": "user", "content": text})
@@ -254,7 +300,28 @@ def translate_request(body: dict[str, Any]) -> dict[str, Any]:
     messages: list[dict[str, Any]] = []
     system = body.get("system")
     if system:
-        messages.append({"role": "system", "content": _text_from_content(system, "system")})
+        if isinstance(system, list) and any(
+            isinstance(block, dict) and block.get("cache_control") is not None
+            for block in system
+        ):
+            # blocks form, preserving per-block cache markers
+            content: list[dict[str, Any]] = []
+            for j, block in enumerate(system):
+                if not isinstance(block, dict):
+                    raise BadRequestError("system: content blocks must be objects")
+                if block.get("type") != "text":
+                    raise BadRequestError(
+                        f"system[{j}]: unsupported content block type {block.get('type')!r} "
+                        "(system supports text blocks)"
+                    )
+                part: dict[str, Any] = {"type": "text", "text": str(block.get("text", ""))}
+                marker = _cache_control(block, f"system[{j}]")
+                if marker is not None:
+                    part["cache_control"] = marker
+                content.append(part)
+            messages.append({"role": "system", "content": content})
+        else:
+            messages.append({"role": "system", "content": _text_from_content(system, "system")})
 
     anthropic_messages = body.get("messages")
     if not isinstance(anthropic_messages, list) or not anthropic_messages:
@@ -496,5 +563,5 @@ async def stream_events(
 
 def prompt_text_of(openai_payload: dict[str, Any]) -> str:
     return "\n".join(
-        str(m.get("content") or "") for m in openai_payload.get("messages", []) if isinstance(m, dict)
+        message_text(m) for m in openai_payload.get("messages", []) if isinstance(m, dict)
     )

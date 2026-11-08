@@ -176,13 +176,15 @@ class WebhookReviewPlugin(Plugin):
     # -- hooks ----------------------------------------------------------------------
 
     async def on_request(self, ctx: PluginContext) -> None:
+        if ctx.passthrough:  # tunnel bodies are not chat payloads; nothing to review
+            return
         if not self.check_request:
             return
         verdict, reason = await self._review(ctx, request_text(ctx.payload), "request")
         self._enforce(ctx, verdict, reason, "request")
 
     async def on_response(self, ctx: PluginContext) -> None:
-        if not self.check_response or ctx.response is None:
+        if ctx.passthrough or not self.check_response or ctx.response is None:
             return
         verdict, reason = await self._review(ctx, response_text(ctx.response), "response")
         self._enforce(ctx, verdict, reason, "response")
@@ -201,7 +203,7 @@ class WebhookReviewPlugin(Plugin):
     async def on_stream_end(self, ctx: PluginContext) -> None:
         """Post-delivery review of a streamed response: the verdict is recorded
         (and a block is logged loudly) but chunks already sent cannot be recalled."""
-        if not self.check_response:
+        if ctx.passthrough or not self.check_response:
             return
         state = ctx.state.get(self.display_name())
         text = state["text"] if state else ""

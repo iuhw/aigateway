@@ -172,6 +172,50 @@ def create_app(config_path: str, *, config_watcher: bool = True) -> FastAPI:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    @app.api_route("/v1/upstream/{model}/{subpath:path}", methods=["GET", "POST"])
+    async def upstream_passthrough(model: str, subpath: str, request: Request) -> Response:
+        """Passthrough tunnel (v1.2): relay a raw request to the model's upstream.
+
+        JSON POST bodies are relayed (with `model` rewritten to the upstream
+        model); GET relays without a body. The upstream status/body stream back
+        unmodified — identity governance still applies (auth/budgets/rate
+        limits/logs/metrics), schema validation/caches/canary do not."""
+        method = request.method
+        body_bytes: bytes | None = None
+        body_dict: Any = None
+        if method == "POST":
+            raw = await _read_body(request)
+            if raw:
+                try:
+                    body_dict = json.loads(raw)
+                except Exception as exc:
+                    raise BadRequestError(f"passthrough body must be valid JSON: {exc}") from exc
+                body_bytes = raw
+        client_host = request.client.host if request.client else ""
+        result = await gateway.passthrough(
+            model_name=model,
+            subpath=subpath,
+            query=request.url.query,
+            method=method,
+            body_bytes=body_bytes,
+            body_dict=body_dict,
+            headers=dict(request.headers),
+            client_host=client_host,
+        )
+        if result.stream is not None:
+            return StreamingResponse(
+                result.stream,
+                status_code=result.status,
+                media_type=result.headers.get("content-type"),
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        return Response(
+            content=result.body if result.body is not None else b"",
+            status_code=result.status,
+            media_type=result.headers.get("content-type"),
+            headers=result.headers,
+        )
+
     @app.post("/v1/embeddings")
     async def embeddings(request: Request) -> Response:
         """OpenAI-compatible embeddings; served through the same auth/plugin/
