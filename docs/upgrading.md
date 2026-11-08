@@ -23,6 +23,14 @@
 
 **无需配置迁移**：v0.1–v0.6 的全部 YAML 配置在 v1.0 下原样可用。
 
+## v1.0 → v1.1
+
+**新增能力**：多模态图像输入（OpenAI 入口 `image_url` parts、Anthropic 入口 image 块、
+三家原生适配器图像翻译）。此前显式拒绝（400）的图像请求现在被支持或以更具体的错误拒绝
+（畸形 part / 超尺寸 / 不支持的 URL 形态）——向兼容方向变化，无破坏。
+
+**新配置项**（均有默认值，零配置可用）：`server.max_image_bytes`（默认 5MB/图）。
+
 ## 历史版本速览（均向后兼容）
 
 | 版本 | 新增 |
@@ -32,6 +40,8 @@
 | v0.4 | pii-redaction / prompt-guard / webhook-review 插件、guardrail 指标、Anthropic 入口护栏错误码 |
 | v0.5 | otel-export / langfuse-export / usage-report 插件、/admin/usage report 段、Grafana 面板 |
 | v0.6 | prompt-template-plugin、canary 灰度切流（models.canary）、canary 指标 |
+| v1.0 | GA：安全自查、文档四件套、YAML 兼容承诺、语义化版本 |
+| v1.1 | 多模态图像输入（OpenAI/Anthropic 入口 + 三家原生适配器 + 缓存图像指纹） |
 
 ## 升级操作
 

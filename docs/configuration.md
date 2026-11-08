@@ -12,7 +12,8 @@
 | `host` / `port` | 0.0.0.0 / 8080 | 监听地址（CLI 可覆盖） |
 | `admin_api_key` | 无 | 保护 `/metrics` 与 `/admin/*`（Bearer 或裸值，常量时间比较）。**未设置 = 开发模式，管理面全开放** |
 | `max_body_bytes` | 10485760 | 请求体上限（413；硬上限 64MB） |
-| `max_messages` / `max_message_chars` | 128 / 200000 | 消息条数 / 总字符准入控制（embeddings 同口径） |
+| `max_messages` / `max_message_chars` | 128 / 200000 | 消息条数 / 总字符（parts 文本计入）准入控制（embeddings 同口径） |
+| `max_image_bytes` | 5242880 | 单张图像（base64 解码后）大小上限，超限 413（v1.1 多模态） |
 | `max_tracked_keys` | 100 | `gateway_key_cost_usd_total` 的 key 标签基数上限，超限聚合 `other` |
 | `tokenizer` / `tokenizer_model` | unicode / gpt-4o-mini | 估算器：`unicode`（CJK 感知启发式）或 `tiktoken`（需 `[tokenizer]` extra，离线自动回退） |
 

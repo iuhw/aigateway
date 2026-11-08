@@ -3,6 +3,27 @@
 本项目的所有显著变更记录在此文件。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；
 自 v1.0 起遵循语义化版本与 YAML 向后兼容承诺（见[升级说明](docs/upgrading.md)）。
 
+## [1.1.0] - 2026-11-08
+
+### Added
+
+- **多模态图像输入**（探索池第一项）：
+  - OpenAI 兼容入口：`image_url` content parts（data URI / https URL）原样透传，
+    `server.max_image_bytes`（默认 5MB/图）准入超限 413；
+  - Anthropic `/v1/messages`：`{"type":"image"}` 块（base64/url source）翻译为 OpenAI parts，
+    text/image 混排保序，纯文本消息形态不变；assistant/tool_result 位置图像明确 400（input-only）；
+  - 原生适配器：gemini `inline_data`（https URL 明确 400——网关不自取远端图）、bedrock Converse
+    `image.format/bytes`（png/jpeg/gif/webp 白名单）、anthropic 原生 base64/url source（URL 由
+    上游取图，网关仍不自取）；
+  - 缓存正确性：语义缓存分区加入图像指纹（同文本不同图像绝不共享答案）；文本扫描/估算只针对
+    parts 文本（图像 token 归上游 usage）。
+
+### Verified
+
+- E2E **28/28**（新增 check-27/28：生成式纯色 PNG 经 OpenAI 与 Anthropic 两入口实弹喂给
+  moondream，模型正确识别颜色）；
+- 基准回归：M5 全链开销 +0.039ms（+6.5%，<10% 门槛）；全量套件 **417 passed, 1 skipped**。
+
 ## [1.0.0] - 2026-11-08
 
 GA 稳定化版本。自 v0.1 交付：统一接入（OpenAI/Anthropic 双协议 + 三家原生上游）、路由与流量治理

@@ -11,7 +11,8 @@ Envoy AI Gateway 的成熟设计自主实现（调研见 [docs/](docs/)）。
 
 - **双协议入口**：OpenAI 兼容 `POST /v1/chat/completions` + **Anthropic Messages API `POST /v1/messages`**
   （非流式 + 流式事件翻译，Claude SDK 可直接接入；支持 **tools**（定义/tool_choice/tool_use/tool_result 块
-  与流式 `input_json_delta` 事件翻译）；另有 **`POST /v1/embeddings`** 走同一套认证/路由/故障转移管道）
+  与流式 `input_json_delta` 事件翻译）与**多模态图像输入**（`image_url` parts / Anthropic image 块，v1.1）；
+  另有 **`POST /v1/embeddings`** 走同一套认证/路由/故障转移管道）
 - 多上游：一切 OpenAI 协议服务（OpenAI / Ollama / vLLM / DeepSeek / Groq / LM Studio …），
   以及 **原生协议适配器**（`type: anthropic` / `type: gemini` / `type: bedrock`，含 SigV4 签名）——
   同一公开模型可跨厂商组合部署与降级
@@ -103,7 +104,7 @@ client ──► FastAPI (api.py)
 ## 测试与基准
 
 ```bash
-.venv/Scripts/python -m pytest tests/ -q        # 388 个测试（含 GA 安全自查/故障注入/混沌/多实例/安全/热重载/停机/tools/embeddings/原生适配器 embeddings/预算/分层定价/租户治理/Admin API/语义缓存/PII 脱敏/提示词注入防护/webhook 审核/OTLP 导出/真实 OTLP wire/用量报表/提示词模板/灰度切流）
+.venv/Scripts/python -m pytest tests/ -q        # 417 个测试（含 GA 安全自查/多模态/故障注入/混沌/多实例/安全/热重载/停机/tools/embeddings/原生适配器 embeddings/预算/分层定价/租户治理/Admin API/语义缓存/PII 脱敏/提示词注入防护/webhook 审核/OTLP 导出/真实 OTLP wire/用量报表/提示词模板/灰度切流）
 .venv/Scripts/python -m ruff check src tests    # lint
 .venv/Scripts/python benchmarks/bench_gateway.py  # 基准 → docs/benchmark-report.md
 
@@ -124,9 +125,10 @@ client ──► FastAPI (api.py)
 - **混沌注入**（30% 随机故障+延迟，300 请求）：零挂起、100% 终态映射、>97% 成功率
 - **耐久**：60 分钟 soak（GA 验收，全插件链含 canary/模板，collector 宕机口径）
   **116,097 请求零错误**，RSS 斜率 +0.252 MB/min、句柄斜率 +3.10/min（无泄漏迹象）
-- **E2E 26/26**（真实 GLM-4-9B + nomic-embed-text）：M4 三项 + M5 两项 + 全面实测五项
-  （Admin API CRUD/保护、预算硬限、key 生命周期、语义缓存真实 embeddings、热重载）；逐功能
-  证据矩阵见 [docs/full-validation-report.md](docs/full-validation-report.md)
+- **E2E 28/28**（真实 GLM-4-9B + nomic-embed-text + moondream 视觉）：M4 三项 + M5 两项 +
+  全面实测五项（Admin API CRUD/保护、预算硬限、key 生命周期、语义缓存真实 embeddings、
+  热重载）+ **v1.1 多模态双入口实弹**（生成式纯色 PNG 喂给真实视觉模型，颜色正确识别）；
+  逐功能证据矩阵见 [docs/full-validation-report.md](docs/full-validation-report.md)
 
 ## Ollama 端到端验证
 
@@ -194,9 +196,9 @@ src/aigateway/
     otel_export.py / langfuse_export.py / usage_report.py   （M4 可观测导出与报表）
     prompt_template.py （M5 提示词模板注入；on_request 请求改写扩展点参考实现）
   observability/metrics.py   Prometheus 指标（含成本）
-tests/              388 tests（单元/集成/GA 安全/wire 故障注入/混沌/多实例/安全/热重载/停机/Anthropic/tools/embeddings/原生适配器 embeddings/预算/定价/租户治理/Admin API/语义缓存/PII/注入防护/webhook 审核/OTLP 导出与真实 wire/用量报表/提示词模板/canary 灰度）
+tests/              417 tests（单元/集成/GA 安全/多模态图像/wire 故障注入/混沌/多实例/安全/热重载/停机/Anthropic/tools/embeddings/原生适配器 embeddings/预算/定价/租户治理/Admin API/语义缓存/PII/注入防护/webhook 审核/OTLP 导出与真实 wire/用量报表/提示词模板/canary 灰度）
 benchmarks/         基准测试（--quick 供 CI）
-scripts/            负载测试、soak 耐久、并行下载器、Ollama 安装、E2E 验证（26 项，含 M3 护栏/M4 可观测/M5 模板与灰度/Admin API/预算/生命周期/语义缓存/热重载）
+scripts/            负载测试、soak 耐久、并行下载器、Ollama 安装、E2E 验证（28 项，含 M3 护栏/M4 可观测/M5 模板与灰度/Admin API/预算/生命周期/语义缓存/热重载/视觉双入口）
 deploy/             生产配置、Prometheus 抓取、Grafana 仪表盘与数据源
 docs/               调研（3 篇）、项目蓝图与复盘、基准/负载/soak/E2E 报告、运维手册
 ```

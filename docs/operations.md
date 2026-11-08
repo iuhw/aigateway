@@ -88,9 +88,10 @@
 1. **token 级限流**基于估算预扣 + 完成后按上游实际用量多退少补；估算默认 Unicode 感知启发式
    （对 o200k_base 校准，聚合误差 ~±20%；短高频词可能高估 ~2x）。可配 `server.tokenizer: tiktoken`
    精确计数（离线安装自动回退启发式）。窗口边界处固定窗口允许最多 2x 突发（与 Kong 相同取舍）。
-2. **Anthropic 兼容面**：`/v1/messages` 支持 system/text blocks/stop_sequences/temperature/
-   top_p/max_tokens、完整流式事件与 **tools**（定义、tool_choice、tool_use/tool_result 块、
-   流式 tool 参数事件）；图片与 citations 明确拒绝（400）。
+2. **Anthropic 兼容面**：`/v1/messages` 支持 system/text blocks/**image blocks（base64/url
+   source，v1.1）**/stop_sequences/temperature/top_p/max_tokens、完整流式事件与 **tools**
+   （定义、tool_choice、tool_use/tool_result 块、流式 tool 参数事件）；citations 与
+   assistant/tool_result 位置的图像明确拒绝（400，图像为 user 消息 input-only）。
 3. **单机网络栈**：SO_REUSEPORT 多进程 / k8s 多 Pod 均可，但网关不提供 TLS——在入口层终结。
 4. **流式 block 过滤的窗口**：检测到关键词前的块已发出（与 Higress 同类插件的已知取舍）。
 5. **上游协议面**：OpenAI 协议（openai）+ 原生适配器 anthropic / gemini / bedrock（Converse，
@@ -160,6 +161,13 @@
     fallbacks 正常生效（canary 失败可回落 stable）。embeddings 请求不走 canary。
     校验期拒绝：target 未配置、target 指向自身、percent 越界；热重载竞态下 target 缺失
     按 stable 放行（告警日志）。
+20. **多模态图像输入**（v1.1）：单图 base64 解码尺寸由 `server.max_image_bytes`（默认 5MB）
+    准入（413）；文本扫描/字符上限/token 估算均只针对 parts 中的文本（图像 token 归上游
+    usage 口径）。**网关自身从不取图**：gemini/bedrock 上游仅接受 base64 data URI（https URL
+    一律 400，避免把网关变成 SSRF 取图代理）；OpenAI 协议上游与 anthropic 原生上游接受 https
+    URL（由上游取图）。语义缓存的分区指纹包含图像引用（同文本不同图像绝不共享答案），但
+    相似度比较仍只看文本。非视觉模型收到图像由上游 4xx 快速失败（网关不做模型能力判定）。
+    响应侧图像、音频/视频输入不在支持范围。
 
 ## 6. 升级与回滚
 

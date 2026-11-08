@@ -81,6 +81,14 @@ models:
         model: nomic-embed-text
     policy:
       timeout_s: 120
+  vision-mdl:
+    # small vision model for the multimodal checks (27/28).
+    # Prereq: ollama pull moondream
+    deployments:
+      - provider: ollama
+        model: moondream
+    policy:
+      timeout_s: 300
 
 plugins:
   auth-plugin:

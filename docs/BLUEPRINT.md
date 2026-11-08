@@ -244,6 +244,30 @@ v0.1 现状 ──► M1 治理 ──► M2 缓存 ──► M3 安全 ──�
 多模态输入（图像/音频，schemas 扩展）；批处理/离线异步接口；**MCP Server 托管与工具治理**；
 **Agent 网关**（会话亲和、Agent 身份）；内置向量检索升级（RedisVL/专用索引）；控制台 UI。
 
+### v1.1（探索池第一项：多模态输入-图像）✅（2026-11-08 交付）
+
+- **范围**：图像**输入**（响应侧图像不在范围）。OpenAI 兼容入口的 `image_url` content parts
+  原样透传 + 准入控制；Anthropic `/v1/messages` 的 `{"type":"image"}` 块（base64/url source）
+  翻译为 OpenAI parts；三家原生适配器落地各自图像形态；两套缓存与扫描/估算链路正确处理 parts。
+- **交付记录**（2026-11-08，417 tests）：
+  - `schemas.py`：`extract_images`（全入口共享的单点校验：data URI ↔ mime/base64、http(s) URL、
+    畸形 400）、`image_data_bytes`（base64 解码尺寸估算）、`image_fingerprint`（逐请求图像指纹）；
+  - 准入：`server.max_image_bytes`（默认 5MB/图，超限 413）；文本扫描/字符上限改按
+    `message_text`（parts 文本计入）；
+  - Anthropic 入口：user 消息 image 块（base64/url source）→ OpenAI parts，text/image 混排保序、
+    纯文本保持 string 形态（向后兼容）；assistant/tool_result 图像明确 400（input-only）；
+  - 原生适配器：gemini `inline_data`（URL 拒绝——网关不自取远端、generateContent 无任意 https
+    图像源）；bedrock Converse `image.format/bytes`（png/jpeg/gif/webp 白名单，其余 400）；
+    anthropic 原生 base64 source（URL 走 Anthropic url source，由上游取图——网关仍不自取）；
+  - 缓存正确性：精确缓存键含完整 payload（图像天然参与）；**语义缓存分区加入图像指纹**
+    （同文本不同图像绝不共享答案）；token 估算仅文本（图像 token 归上游 usage 口径）；
+  - 验收：28 项新测试（提取/限制/翻译/守卫/分区）+ 基准回归（图像准入遍历并入既有单遍
+    校验，无额外热路径遍历）+ E2E check-27/28（**moondream 实弹识别生成 PNG 的纯色**，
+    OpenAI 入口与 Anthropic 入口双路径）。
+- **边界**：https 图像 URL 对 gemini/bedrock 明确 400（网关不做 SSRF 面的远程取图）；OpenAI
+  协议上游与 anthropic 原生上游接受 URL（由上游取图）；非视觉模型收到图像由上游 4xx 快速失败；
+  响应侧图像/音频输入/视频不在本里程碑。
+
 ## 4. 横切工程原则（每个里程碑都适用）
 
 1. **插件优先**：能用插件实现的不进 core（M2/M3/M4 全部是插件）——core 只维护路由、调度、计量；

@@ -40,6 +40,9 @@ via ASGITransport but a REAL upstream Ollama server):
   25 semantic cache live over real embeddings (ollama nomic-embed-text):
      paraphrase hits the cached answer, hit counted in metrics
   26 hot reload live: config file edit adds a model route and serves it
+  27 vision (OpenAI entry): image part to a real vision model (moondream
+     identifies the solid color of a generated PNG)
+  28 vision (Anthropic entry): Anthropic base64 image source via /v1/messages
 
 The webhook-review check needs a review service: this script starts a tiny
 local allow-stub on 127.0.0.1:11439 (matching gateway.ollama.yaml) for the
@@ -49,7 +52,8 @@ Checks 20-21 need the prompt-template/canary config in gateway.ollama.yaml
 and the `glm4:9b-canary` ollama tag (ollama cp glm4:9b glm4:9b-canary).
 Checks 22-26 need server.admin_api_key + pricing in gateway.ollama.yaml,
 the `nomic-embed-text` ollama model (semantic cache), and an admin key
-(header constant ADMIN_AUTH = admin-e2e-key).
+(header constant ADMIN_AUTH = admin-e2e-key). Checks 27-28 need the
+`moondream` ollama model (ollama pull moondream, vision-mdl route).
 """
 
 from __future__ import annotations
@@ -74,6 +78,10 @@ from aigateway.api import create_app  # noqa: E402
 RESULTS: list[tuple[str, bool, str]] = []
 
 ADMIN_AUTH = {"Authorization": "Bearer admin-e2e-key"}
+
+# 8x8 solid-color PNGs (stdlib-generated, deterministic) for the vision checks.
+RED_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEklEQVR4nGP4z8CAFWEXHbQSACj/P8Fu7N9hAAAAAElFTkSuQmCC"
+BLUE_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEElEQVR4nGNgYPiPAw0pCQCpcD/BFMrqcwAAAABJRU5ErkJggg=="
 
 
 def record(name: str, ok: bool, detail: str) -> None:
@@ -643,6 +651,90 @@ async def chat_with(client: httpx.AsyncClient, headers: dict, content: str) -> h
     )
 
 
+async def check_27_vision_openai_entry(client: httpx.AsyncClient) -> None:
+    """v1.1: image input through the OpenAI entry to a real vision model
+    (moondream) — the model must identify the solid color of an 8x8 PNG.
+    moondream occasionally emits a blank/1-token answer, so up to 3 attempts."""
+    response = None
+    content = ""
+    for _attempt in range(3):
+        response = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer sk-e2e-demo-key"},
+            json={
+                "model": "vision-mdl",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "What is the main color of this image? Answer with just the color word.",
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "data:image/png;base64," + RED_PNG_B64},
+                            },
+                        ],
+                    }
+                ],
+            },
+            timeout=320,
+        )
+        if response.status_code == 200:
+            content = response.json()["choices"][0]["message"]["content"].lower()
+            if "red" in content or "红" in content:
+                break
+    ok = response is not None and response.status_code == 200 and ("red" in content or "红" in content)
+    record(
+        "27 vision (OpenAI entry)",
+        ok,
+        f"status={response.status_code if response else 'n/a'} answer={content[:60]!r}",
+    )
+
+
+async def check_28_vision_anthropic_entry(client: httpx.AsyncClient) -> None:
+    """v1.1: the same image through /v1/messages (Anthropic base64 image
+    source translated to an OpenAI image part upstream); up to 3 attempts."""
+    response = None
+    content = ""
+    for _attempt in range(3):
+        response = await client.post(
+            "/v1/messages",
+            headers={"Authorization": "Bearer sk-e2e-demo-key"},
+            json={
+                "model": "vision-mdl",
+                "max_tokens": 60,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {"type": "base64", "media_type": "image/png", "data": BLUE_PNG_B64},
+                            },
+                            {
+                                "type": "text",
+                                "text": "What is the main color of this image? Answer with just the color word.",
+                            },
+                        ],
+                    }
+                ],
+            },
+            timeout=320,
+        )
+        if response.status_code == 200:
+            content = response.json()["content"][0]["text"].lower()
+            if "blue" in content or "蓝" in content:
+                break
+    ok = response is not None and response.status_code == 200 and ("blue" in content or "蓝" in content)
+    record(
+        "28 vision (Anthropic entry)",
+        ok,
+        f"status={response.status_code if response else 'n/a'} answer={content[:60]!r}",
+    )
+
+
 REVIEW_STUB_PORT = 11439
 OTLP_STUB_PORT = 11440
 
@@ -753,6 +845,8 @@ async def main_async(config_path: str, report_path: str) -> int:
         check_24_key_lifecycle,
         check_25_semantic_cache,
         lambda client: check_26_hot_reload(client, app.state.gateway),
+        check_27_vision_openai_entry,
+        check_28_vision_anthropic_entry,
     ]
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://e2e") as client:
