@@ -46,6 +46,33 @@ def slope_per_minute(samples: list[tuple[float, float]]) -> float:
     return sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / denom
 
 
+def rolling_min_slope(
+    samples: list[tuple[float, float]], window_s: float, step_s: float
+) -> tuple[float, list[tuple[float, float]]]:
+    """Slope over rolling-window minima.
+
+    The raw handle count sawtooths with the dead-collector OTLP retry batches
+    (amplitude ~5k handles, period ~100s), so a plain least-squares slope is
+    dominated by sawtooth phase alignment and flips between runs on identical
+    code. The per-window minimum tracks the true baseline; a window >= 3x the
+    sawtooth period always contains a trough. Falls back to the raw series
+    when the run is too short to fill 3 windows.
+    """
+    if not samples:
+        return 0.0, []
+    t0 = samples[0][0]
+    pts: list[tuple[float, float]] = []
+    start = t0
+    while start <= samples[-1][0] - window_s:
+        window = [v for t, v in samples if start <= t < start + window_s]
+        if window:
+            pts.append((start - t0, min(window)))
+        start += step_s
+    if len(pts) < 3:
+        return slope_per_minute(samples), samples
+    return slope_per_minute(pts), pts
+
+
 async def main_async(args: argparse.Namespace) -> int:
     process = psutil.Process() if psutil else None
     app = create_app(args.config, config_watcher=False)
@@ -93,7 +120,9 @@ async def main_async(args: argparse.Namespace) -> int:
     rss_samples = [(t, rss) for t, rss, _ in samples]
     handle_samples = [(t, h) for t, _, h in samples if h]
     rss_slope = slope_per_minute(rss_samples)
-    handle_slope = slope_per_minute(handle_samples)
+    # Handles: judge the trough (baseline) trend, not the raw sawtooth.
+    handle_slope, handle_troughs = rolling_min_slope(handle_samples, window_s=180.0, step_s=60.0)
+    handle_raw_slope = slope_per_minute(handle_samples)
     rss_growth_total = rss_samples[-1][1] - rss_samples[len(rss_samples) // 2][1] if len(rss_samples) > 2 else 0.0
 
     # Leak thresholds: allow interpreter noise; a real leak grows steadily.
@@ -113,7 +142,10 @@ async def main_async(args: argparse.Namespace) -> int:
         "验证 fire-and-forget 不泄漏、不拖垮请求路径",
         f"- RSS：起始 {samples[0][1]:.1f} MB → 结束 {samples[-1][1]:.1f} MB"
         f"（斜率 {rss_slope:+.3f} MB/min，后半程净增 {rss_growth_total:+.1f} MB）",
-        f"- 句柄：斜率 {handle_slope:+.2f} /min" if handle_samples else "- 句柄：psutil 不可用",
+        f"- 句柄：滚动 3 分钟谷值斜率 {handle_slope:+.2f} /min（原始斜率 {handle_raw_slope:+.2f} /min；"
+        "原始计数含死 collector 的 OTLP 重试批量尖峰，谷值反映真实基线）"
+        if handle_samples
+        else "- 句柄：psutil 不可用",
         "",
         "| 检查项 | 阈值 | 结果 |",
         "|---|---|---|",
@@ -135,6 +167,8 @@ async def main_async(args: argparse.Namespace) -> int:
                 "errors": errors,
                 "rss_slope_mb_per_min": rss_slope,
                 "handle_slope_per_min": handle_slope,
+                "handle_slope_raw_per_min": handle_raw_slope,
+                "handle_troughs": handle_troughs,
                 "samples": [(t, rss, h) for t, rss, h in samples],
             },
             indent=2,
