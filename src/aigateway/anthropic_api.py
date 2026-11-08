@@ -6,12 +6,14 @@ dispatches, and OpenAI responses (including SSE chunks) are translated back to
 Anthropic format. This is the same protocol-conversion job Higress `ai-proxy`
 does, scoped to text completions.
 
-Supported: system (string/blocks), text content blocks, stop_sequences,
-temperature/top_p/max_tokens, streaming (message_start / content_block_* /
-message_delta / message_stop events), and tools — definitions, tool_choice,
-tool_use / tool_result message blocks, and streamed tool-call arguments
-(input_json_delta events). Not supported: images, citations — rejected with a
-clear error rather than silently mangled.
+Supported: system (string/blocks), text content blocks, **image content blocks
+(base64 and URL sources — translated to OpenAI image parts for the upstream)**,
+stop_sequences, temperature/top_p/max_tokens, streaming (message_start /
+content_block_* / message_delta / message_stop events), and tools —
+definitions, tool_choice, tool_use / tool_result message blocks, and streamed
+tool-call arguments (input_json_delta events). Not supported: citations and
+image blocks outside user messages (tool_result images, assistant images) —
+rejected with a clear error rather than silently mangled.
 """
 
 from __future__ import annotations
@@ -76,10 +78,37 @@ def _text_from_content(content: Any, where: str) -> str:
             else:
                 raise BadRequestError(
                     f"{where}: unsupported content block type {block_type!r} "
-                    "(text/tool_use/tool_result are supported by this gateway)"
+                    "(text/tool_use/tool_result are supported here; images are "
+                    "user-message blocks only)"
                 )
         return "".join(parts)
     raise BadRequestError(f"{where}: content must be a string or a list of blocks")
+
+
+def _openai_image_part(source: Any, where: str) -> dict[str, Any]:
+    """Anthropic image source -> OpenAI image_url content part."""
+    if not isinstance(source, dict):
+        raise BadRequestError(f"{where}: image block requires a 'source' object")
+    source_type = source.get("type")
+    if source_type == "base64":
+        media_type = source.get("media_type")
+        data = source.get("data")
+        if not isinstance(media_type, str) or not media_type.startswith("image/"):
+            raise BadRequestError(
+                f"{where}: image source media_type must be an 'image/*' string "
+                f"(got {media_type!r})"
+            )
+        if not isinstance(data, str) or not data:
+            raise BadRequestError(f"{where}: image source requires base64 'data'")
+        return {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{data}"}}
+    if source_type == "url":
+        url = source.get("url")
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            raise BadRequestError(f"{where}: image url source must be an http(s) URL")
+        return {"type": "image_url", "image_url": {"url": url}}
+    raise BadRequestError(
+        f"{where}: image source type must be 'base64' or 'url' (got {source_type!r})"
+    )
 
 
 def _openai_tools(tools: Any) -> list[dict[str, Any]]:
@@ -144,12 +173,24 @@ def _translate_messages(anthropic_messages: Any) -> list[dict[str, Any]]:
 
         text_parts: list[str] = []
         tool_calls: list[dict[str, Any]] = []
+        content_parts: list[dict[str, Any]] | None = None  # multimodal list once an image appears
         for block in blocks:
             if not isinstance(block, dict):
                 raise BadRequestError(f"messages[{i}]: content blocks must be objects")
             block_type = block.get("type")
             if block_type == "text":
                 text_parts.append(str(block.get("text", "")))
+                if content_parts is not None:
+                    content_parts.append({"type": "text", "text": str(block.get("text", ""))})
+            elif block_type == "image" and role == "user":
+                if content_parts is None:
+                    content_parts = []
+                    if text_parts:
+                        content_parts.append({"type": "text", "text": "".join(text_parts)})
+                        text_parts = []
+                content_parts.append(_openai_image_part(block.get("source"), f"messages[{i}]"))
+            elif block_type == "image":
+                raise BadRequestError(f"messages[{i}]: image blocks are input-only (user messages)")
             elif block_type == "tool_use" and role == "assistant":
                 if not block.get("id") or not block.get("name"):
                     raise BadRequestError(f"messages[{i}]: tool_use requires 'id' and 'name'")
@@ -189,6 +230,10 @@ def _translate_messages(anthropic_messages: Any) -> list[dict[str, Any]]:
             if tool_calls:
                 entry["tool_calls"] = tool_calls
             openai_messages.append(entry)
+        elif content_parts is not None:
+            # multimodal user turn: post-image text was appended in-loop,
+            # pre-image text was flushed into parts when the image appeared
+            openai_messages.append({"role": "user", "content": content_parts})
         elif text or not blocks:  # user turn keeps its text (tool results already emitted)
             openai_messages.append({"role": "user", "content": text})
     return openai_messages

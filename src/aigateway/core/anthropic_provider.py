@@ -23,7 +23,7 @@ from aigateway.core.provider import (
     UpstreamStreamError,
     UpstreamUnavailable,
 )
-from aigateway.schemas import message_text
+from aigateway.schemas import extract_images, message_text
 
 ANTHROPIC_STOP_REASON_TO_OPENAI = {
     "end_turn": "stop",
@@ -89,7 +89,29 @@ def to_anthropic_request(
                 )
             _append("assistant", blocks)
             continue
-        _append("user", [{"type": "text", "text": message_text(message)}])
+        # user turn: text plus image blocks (base64 sources; https URLs pass
+        # through as Anthropic url sources — the upstream fetches, not us).
+        user_blocks: list[dict[str, Any]] = []
+        user_text = message_text(message)
+        if user_text:
+            user_blocks.append({"type": "text", "text": user_text})
+        for image in extract_images(message):
+            if "data" in image:
+                user_blocks.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": image["mime_type"],
+                            "data": image["data"],
+                        },
+                    }
+                )
+            else:
+                user_blocks.append(
+                    {"type": "image", "source": {"type": "url", "url": image["url"]}}
+                )
+        _append("user", user_blocks)
 
     fallback = [{"role": "user", "content": [{"type": "text", "text": ""}]}]
     body: dict[str, Any] = {"messages": anthropic_messages or fallback}

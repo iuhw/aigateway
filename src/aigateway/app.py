@@ -23,6 +23,9 @@ from aigateway.schemas import (
     cache_tokens_of,
     chunk_text,
     embedding_request_text,
+    extract_images,
+    image_data_bytes,
+    message_text,
     request_text,
     response_text,
 )
@@ -282,9 +285,22 @@ class GatewayApp:
                     f"too many messages: {len(messages)} > {max_messages}"
                 )
             max_chars = int(limits.get("max_message_chars", 200_000))
-            total_chars = sum(
-                len(str(m.get("content") or "")) for m in messages if isinstance(m, dict)
-            )
+            max_image_bytes = int(limits.get("max_image_bytes", 5 * 1024 * 1024))
+            total_chars = 0
+            for i, message in enumerate(messages):
+                if not isinstance(message, dict):
+                    continue
+                total_chars += len(message_text(message))
+                images = extract_images(message)
+                if images:
+                    from aigateway.errors import PayloadTooLargeError
+
+                    size = image_data_bytes(images)
+                    if size > max_image_bytes:
+                        raise PayloadTooLargeError(
+                            f"messages[{i}]: image payload {size} bytes > "
+                            f"max_image_bytes {max_image_bytes}"
+                        )
             if total_chars > max_chars:
                 from aigateway.errors import PayloadTooLargeError
 

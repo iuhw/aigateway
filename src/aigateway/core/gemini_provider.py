@@ -21,7 +21,8 @@ from aigateway.core.provider import (
     UpstreamStreamError,
     UpstreamUnavailable,
 )
-from aigateway.schemas import embedding_inputs, embedding_list_body, message_text
+from aigateway.errors import BadRequestError
+from aigateway.schemas import embedding_inputs, embedding_list_body, extract_images, message_text
 
 DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com"
 
@@ -101,7 +102,23 @@ def to_gemini_request(payload: dict[str, Any]) -> dict[str, Any]:
                 )
             _append("model", parts or [{"text": ""}])
             continue
-        _append("user", [{"text": message_text(message)}])
+        # user turn: text plus inline_data images (base64 data URIs only —
+        # the gateway never fetches remote URLs itself, and Gemini's
+        # generateContent has no arbitrary-https image source).
+        user_parts: list[dict[str, Any]] = []
+        user_text = message_text(message)
+        if user_text:
+            user_parts.append({"text": user_text})
+        for image in extract_images(message):
+            if "data" not in image:
+                raise BadRequestError(
+                    "gemini upstream requires base64 data-URI images; "
+                    f"https image URLs cannot be forwarded ({image['url'][:80]})"
+                )
+            user_parts.append(
+                {"inline_data": {"mime_type": image["mime_type"], "data": image["data"]}}
+            )
+        _append("user", user_parts or [{"text": ""}])
 
     body: dict[str, Any] = {"contents": contents or [{"role": "user", "parts": [{"text": ""}]}]}
     if system_parts:

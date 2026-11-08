@@ -29,7 +29,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, ClassVar
 
 from aigateway.plugins.base import Plugin, PluginContext, register_plugin
-from aigateway.schemas import message_text
+from aigateway.schemas import image_fingerprint, message_text
 
 logger = logging.getLogger("aigateway.plugins.semantic_cache")
 
@@ -42,7 +42,9 @@ def partition_key(model: str, payload: dict[str, Any]) -> str:
 
     System messages are fingerprinted here instead of being embedded (see
     `messages_text`): requests running under different system prompts land in
-    different partitions and can never serve each other's cached answers."""
+    different partitions and can never serve each other's cached answers.
+    Image references are fingerprinted too — two requests with the same text
+    but different images must never share an answer."""
     normalized = {
         "model": model,
         "temperature": payload.get("temperature"),
@@ -54,6 +56,7 @@ def partition_key(model: str, payload: dict[str, Any]) -> str:
         "tool_choice": payload.get("tool_choice"),
         "response_format": payload.get("response_format"),
         "system": _system_text(payload),
+        "images": image_fingerprint(payload),
     }
     blob = json.dumps(normalized, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()

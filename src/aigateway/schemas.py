@@ -12,6 +12,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from aigateway.errors import BadRequestError
+
 
 class ChatCompletionRequest(BaseModel):
     """Minimal strict validation for the fields the gateway itself reasons about."""
@@ -171,6 +173,82 @@ def message_text(message: dict[str, Any]) -> str:
 def request_text(payload: dict[str, Any]) -> str:
     """All user-visible text of a chat request, joined for scanning."""
     return "\n".join(message_text(m) for m in payload.get("messages", []))
+
+
+# ---- multimodal (image input) helpers (v1.1) -------------------------------------
+
+_DATA_URI_PREFIX = "data:"
+
+
+def extract_images(message: dict[str, Any]) -> list[dict[str, str]]:
+    """Normalized image references from one message's content parts.
+
+    Returns ``{"mime_type", "data"}`` items for base64 data URIs and
+    ``{"url"}`` items for http(s) URLs, in message order. Raises
+    BadRequestError on malformed image parts (one validation point for the
+    OpenAI entry and all native adapters). Text-only/string messages return [].
+    """
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    images: list[dict[str, str]] = []
+    for i, part in enumerate(content):
+        if not isinstance(part, dict) or part.get("type") != "image_url":
+            continue
+        image_url = part.get("image_url")
+        url = image_url.get("url") if isinstance(image_url, dict) else image_url
+        if not isinstance(url, str) or not url.strip():
+            raise BadRequestError(
+                f"content[{i}]: image_url requires a 'url' string (data URI or https URL)"
+            )
+        url = url.strip()
+        if url.startswith(_DATA_URI_PREFIX):
+            header, _, data = url.partition(",")
+            media_type = header[len(_DATA_URI_PREFIX) :].split(";", 1)[0].strip()
+            if not data or not media_type.startswith("image/"):
+                raise BadRequestError(
+                    f"content[{i}]: image data URI must look like "
+                    "'data:image/png;base64,<data>' (got media type {media_type!r})"
+                )
+            images.append({"mime_type": media_type, "data": data})
+        elif url.startswith(("http://", "https://")):
+            images.append({"url": url})
+        else:
+            raise BadRequestError(
+                f"content[{i}]: image url must be a data URI (base64) or an http(s) URL"
+            )
+    return images
+
+
+def image_data_bytes(images: list[dict[str, str]]) -> int:
+    """Approximate decoded byte size of the data-URI images in a request."""
+    total = 0
+    for image in images:
+        if "data" in image:
+            # base64: 4 chars -> 3 bytes, minus padding
+            total += len(image["data"]) * 3 // 4
+    return total
+
+
+def image_fingerprint(payload: dict[str, Any]) -> list[str]:
+    """Stable per-request fingerprint of every image reference, for cache
+    partitioning: requests that differ only in their images must never share
+    a cached text answer. Data URIs are hashed whole; URLs by string."""
+    import hashlib
+
+    fingerprints: list[str] = []
+    for message in payload.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        for image in extract_images(message):
+            if "data" in image:
+                digest = hashlib.sha256(
+                    f"{image['mime_type']}\x1f{image['data']}".encode()
+                ).hexdigest()
+                fingerprints.append(f"sha256:{digest}")
+            else:
+                fingerprints.append(f"url:{image['url']}")
+    return sorted(fingerprints)
 
 
 def response_text(body: dict[str, Any]) -> str:

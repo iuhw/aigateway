@@ -23,7 +23,27 @@ from aigateway.core.provider import (
     UpstreamUnavailable,
 )
 from aigateway.core.sigv4 import amz_date_now, sigv4_headers
-from aigateway.schemas import embedding_inputs, embedding_list_body, message_text
+from aigateway.errors import BadRequestError
+from aigateway.schemas import embedding_inputs, embedding_list_body, extract_images, message_text
+
+#: Converse accepts these image formats only; mime types outside the set are
+#: rejected at translation time so upstream errors stay client-actionable.
+_CONVERSE_IMAGE_FORMATS = {
+    "image/png": "png",
+    "image/jpeg": "jpeg",
+    "image/jpg": "jpeg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+}
+
+
+def _converse_image_format(mime_type: str) -> str:
+    fmt = _CONVERSE_IMAGE_FORMATS.get(mime_type.lower())
+    if fmt is None:
+        raise BadRequestError(
+            f"bedrock upstream supports png/jpeg/gif/webp images; got {mime_type!r}"
+        )
+    return fmt
 
 BEDROCK_STOP_REASON_TO_OPENAI = {
     "end_turn": "stop",
@@ -94,7 +114,27 @@ def to_converse_request(
                 )
             _append("assistant", blocks)
             continue
-        _append("user", [{"text": message_text(message)}])
+        # user turn: text plus Converse image blocks (base64 data URIs only —
+        # the gateway never fetches remote URLs itself).
+        user_blocks: list[dict[str, Any]] = []
+        user_text = message_text(message)
+        if user_text:
+            user_blocks.append({"text": user_text})
+        for image in extract_images(message):
+            if "data" not in image:
+                raise BadRequestError(
+                    "bedrock upstream requires base64 data-URI images; "
+                    f"https image URLs cannot be forwarded ({image['url'][:80]})"
+                )
+            user_blocks.append(
+                {
+                    "image": {
+                        "format": _converse_image_format(image["mime_type"]),
+                        "source": {"bytes": image["data"]},
+                    }
+                }
+            )
+        _append("user", user_blocks)
 
     body: dict[str, Any] = {"messages": messages or [{"role": "user", "content": [{"text": ""}]}]}
     if system_parts:

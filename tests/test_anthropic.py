@@ -188,10 +188,32 @@ def test_translate_request_rejects_malformed_tools():
         )
 
 
-def test_translate_request_rejects_images():
+def test_translate_request_rejects_malformed_image_source():
+    # v1.1: well-formed image blocks are translated (see test_multimodal.py);
+    # a source without type/data is still rejected with a specific error.
     body = anthropic_body(messages=[{"role": "user", "content": [{"type": "image", "source": {}}]}])
-    with pytest.raises(Exception, match="unsupported content block"):
+    with pytest.raises(Exception, match="image source"):
         translate_request(body)
+
+
+def test_translate_request_translates_image_block():
+    body = anthropic_body(
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "look"},
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/png", "data": "QQ=="},
+                    },
+                ],
+            }
+        ]
+    )
+    payload = translate_request(body)
+    content = payload["messages"][0]["content"]
+    assert content[1] == {"type": "image_url", "image_url": {"url": "data:image/png;base64,QQ=="}}
 
 
 def test_translate_request_rejects_bad_role():
