@@ -168,6 +168,19 @@
     URL（由上游取图）。语义缓存的分区指纹包含图像引用（同文本不同图像绝不共享答案），但
     相似度比较仍只看文本。非视觉模型收到图像由上游 4xx 快速失败（网关不做模型能力判定）。
     响应侧图像、音频/视频输入不在支持范围。
+21. **cache_control 保真**（v1.2）：Anthropic 入口与原生适配器双向透传 `cache_control`
+    （prompt caching 标记，附在 text/image/tool_use/tool_result 块、system 块与 tools 定义上）；
+    带 cache_control 的消息 content 升级为 parts 形态（无标记保持历史 string 形态，向后兼容）。
+    **gemini/bedrock 上游仍丢弃该标记**（映射各自缓存机制后置）；OpenAI 协议上游因 verbatim
+    转发自动透传。
+22. **passthrough 逃生通道**（opt-in，v1.2）：`/v1/upstream/{model}/{path}`（GET/POST，JSON 体）
+    把请求原样透传到该模型上游（`model` 字段重写为上游模型名）。身份治理仍生效（虚拟 key、
+    模型白名单、预算/配额、限流、并发帽、请求日志、指标），但 **schema 校验、两级缓存、canary、
+    流式/响应内容过滤（keyword/pii 在 chat 形态体上自然生效，非 chat 形态为 no-op）均不适用**
+    ——隧道语义优先可预测。上游 4xx/5xx 原样回传（非网关错误信封）；仅 5xx/429/408/409/425
+    计入部署冷却（隧道路径上的 4xx 是调用方的问题，不惩罚部署）。仅 openai/anthropic 类型上游
+    支持（gemini/bedrock 400）；multipart/二进制上传与 usage-based 计费（仅当响应体自带 usage
+    才计入）不在范围。
 
 ## 6. 升级与回滚
 

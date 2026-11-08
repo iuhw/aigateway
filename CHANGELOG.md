@@ -3,6 +3,42 @@
 本项目的所有显著变更记录在此文件。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；
 自 v1.0 起遵循语义化版本与 YAML 向后兼容承诺（见[升级说明](docs/upgrading.md)）。
 
+## [1.2.0] - 2026-11-08
+
+功能复盘与差距分析（[docs/gap-analysis-2026-11.md](docs/gap-analysis-2026-11.md)）确认的两个
+v1.1.x 量级问题的修复版本。
+
+### Fixed
+
+- **Anthropic 入口 `cache_control` 静默丢失**（与 LiteLLM #26477 同类缺陷，全面实测轮后对照
+  行业发现的缺陷面）：`/v1/messages` 请求块上的 prompt caching 标记（text/image/tool_use/
+  tool_result 块、system 块、tools 定义）如今**双向透传**——入口翻译保留标记（带标记的消息
+  content 升级为 parts 形态，无标记保持历史 string 形态），anthropic 原生适配器回写为
+  Anthropic 块级字段；OpenAI 协议上游因 verbatim 转发自动透传。畸形标记 400 而非静默丢弃。
+
+### Added
+
+- **passthrough 逃生通道**（默认关闭）：`POST|GET /v1/upstream/{model}/{path}` 把原始请求
+  透传到该模型的上游（`model` 字段重写为上游模型名），为上游新端点（如 Responses API、
+  files/batches）被网关 schema 挡住时提供出路。身份治理仍生效（虚拟 key 认证、模型白名单、
+  预算/配额、限流、并发帽、请求日志、指标）；schema 校验、两级缓存、canary、流式/响应内容
+  过滤不适用（隧道语义）。上游 4xx/5xx 原样回传；SSE 流式中继；仅 openai/anthropic 类型上游
+  支持。配置 `server.passthrough.enabled`（默认 false），开启时 `aigateway check` 打印
+  WARNING；新指标 `gateway_passthrough_requests_total{model}`。
+
+### Verified
+
+- 全量套件新增 39 项测试（cache_control 保真 22 项 + passthrough 隧道 17 项），**456 passed, 1 skipped**；
+- E2E **28/29**：新增 check-29 passthrough 实弹通过（原始请求经隧道命中 Ollama、上游模型名回证、
+  模板注入旁路、未认证 401、`gateway_passthrough_requests_total` 计数），5 轮运行全过。唯一未过项
+  check-28（Anthropic 入口视觉）为本机 Ollama/llama.cpp 运行时当日劣化所致——**绕过网关直连上游
+  同样返回空输出**（同一 8×8 蓝色 PNG 当日早些时候可正确识别），且 check-27（同一上游、OpenAI
+  入口路径）实弹通过、Anthropic 入口翻译对该请求形态经单测验证逐字段等价；v1.1 同路径当日上午
+  28/28 全过。E2E 脚本新增视觉检查前的 ollama 模型卸载加固（实测 12GB 卡上 glm4+embed+moondream
+  共载会令 moondream 输出空/乱码，卸载后恢复）；
+- 基准回归：M5 全链（场景 10）背靠背复跑 +0.006ms（+1.0%，<10% 门槛）；热路径不含本次改动面
+  （cache_control 仅翻译层逐块一次 dict 读取，passthrough 为独立端点）。
+
 ## [1.1.0] - 2026-11-08
 
 ### Added

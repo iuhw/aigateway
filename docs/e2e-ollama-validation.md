@@ -1,28 +1,28 @@
 # Ollama 端到端验证报告
 
-- 时间：2026-11-08 08:42:01
+- 时间：2026-11-08 12:27:44
 - 上游：本地 Ollama glm4:9b（GLM-4-9B-Chat Q4_K_S，12GB RTX 5070 Ti）
-- 结果：**28/28 通过**
+- 结果：**28/29 通过**
 
 | # | 验证项 | 结果 | 详情 |
 |---|---|---|---|
 | 1 model listing | ✅ | PASS | status=200 models=['embed-mdl', 'failover-demo', 'glm4-canary', 'glm4-limited', 'glm4:9b', 'vision-mdl'] |
-| 2 non-streaming completion | ✅ | PASS | reply='我是一个专注于人工智能和数据分析的专家 [[E2E-M5-e2e-tester]' usage=46/20tok |
-| 3 streaming completion | ✅ | PASS | ttft=565ms chunks-text='从1数到5，用顿号分隔：1, 2, 3, 4, 5 [[E2' finish=stop |
+| 2 non-streaming completion | ✅ | PASS | reply='我是负责推动AI技术的产品经理 [[E2E-M5-e2e-tester]].' usage=46/20tok |
+| 3 streaming completion | ✅ | PASS | ttft=362ms chunks-text='1, 2, 3, 4, 5 [[E2E-M5-e2e-tes' finish=stop |
 | 4 auth (virtual key) | ✅ | PASS | missing=401 invalid=401 |
 | 5 keyword filter blocks request | ✅ | PASS | status=400 body={"error":{"message":"E2E: request blocked by keyword filter.","type":"content_filter_rejected","code":"content_filter_re |
 | 6 keyword mask on response | ✅ | PASS | reply='这是**文件。[[E2E-M5-e2e-tester]].' |
-| 7 exact-match cache | ✅ | PASS | id1=chatcmpl-837 id2=chatcmpl-837 same=True |
+| 7 exact-match cache | ✅ | PASS | id1=chatcmpl-561 id2=chatcmpl-561 same=True |
 | 8 rate limiting (rpm=2 -> 429) | ✅ | PASS | statuses=[200, 200, 429, 429] |
 | 9 failover to healthy fallback | ✅ | PASS | status=200 served_model=glm4:9b |
 | 10 Prometheus metrics | ✅ | PASS | missing=none |
 | 11 concurrent burst x5 | ✅ | PASS | statuses=[200, 200, 200, 200, 200] |
-| 12 Anthropic /v1/messages non-stream | ✅ | PASS | reply='长城是中国古代的军事防御工程，是世界文化遗产之一。 [[E2' stop=end_turn |
+| 12 Anthropic /v1/messages non-stream | ✅ | PASS | reply='长城是中国古代的军事防御工程，被誉为世界奇迹之一。[[E2E' stop=end_turn |
 | 13 Anthropic streaming events | ✅ | PASS | events=6 text='1, 2, 3 [[E2E-M5-e2e-tester]].' |
 | 14 PII mask roundtrip | ✅ | PASS | reply='我的手机号是*********** [[E2E-M5-e2e-tester]].' |
 | 15 prompt-guard blocks injection | ✅ | PASS | status=400 body={"error":{"message":"Prompt injection attempt detected and blocked.","type":"prompt_injection_detected","code":"prompt_i |
 | 16 webhook-review allow path | ✅ | PASS | status=200 counter_allowed=True |
-| 17 OTLP traces received | ✅ | PASS | exports=2 spans=21 chats=20 model_ok=True with_ttft=2 failover_spans=1 upstream_children=1 |
+| 17 OTLP traces received | ✅ | PASS | exports=2 spans=20 chats=19 model_ok=True with_ttft=1 failover_spans=1 upstream_children=1 |
 | 18 usage report reconciles | ✅ | PASS | statuses=[200, 200, 200] request_delta=3 key_delta=3 prompt_token_delta=92 bucket=hour |
 | 19 collector down -> requests unaffected | ✅ | PASS | statuses=[200, 200, 200] (collector stopped before these requests) |
 | 20 prompt template injection | ✅ | PASS | reply='好 [[E2E-M5-e2e-tester]].' token=True unsubstituted=False |
@@ -30,7 +30,8 @@
 | 22 admin key CRUD + protection | ✅ | PASS | virtual-key-denied=401 masked=True auth=200 delete=200 after-delete=401 |
 | 23 budget hard limit | ✅ | PASS | first=200 second=429 code='budget_exceeded' (pricing glm4:9b input_per_1k=1.0; budget daily_usd=0.000001) |
 | 24 key lifecycle (expiry + concurrency) | ✅ | PASS | expired=403/'key_expired' concurrent=[200, 429] codes=['concurrency_exceeded'] |
-| 25 semantic cache (real embeddings) | ✅ | PASS | paraphrase-served-cached-answer=True metric=True answer='我是一个专注于人工智能和数据分析的专家 [[E2E-M5-e' |
+| 25 semantic cache (real embeddings) | ✅ | PASS | paraphrase-served-cached-answer=True metric=True answer='我是负责推动AI技术的产品经理 [[E2E-M5-e2e-t' |
 | 26 hot reload adds model | ✅ | PASS | reloaded=True models=['embed-mdl', 'failover-demo', 'glm4-canary', 'glm4-limited', 'glm4:9b', 'hot-added', 'vision-mdl'] served=200 |
-| 27 vision (OpenAI entry) | ✅ | PASS | status=200 answer='\nin the image, a solid red background is presented, devoid o' |
-| 28 vision (Anthropic entry) | ✅ | PASS | status=200 answer='\xa0dark blue' |
+| 27 vision (OpenAI entry) | ✅ | PASS | status=200 answer='\nthe image features a vivid, bright red surface spanning alm' |
+| 28 vision (Anthropic entry) | ❌ | FAIL | status=200 answer='' |
+| 29 passthrough tunnel | ✅ | PASS | auth=401 status=200 model='glm4:9b' answer='Pong' template_bypassed=True metric=True |

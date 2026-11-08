@@ -16,6 +16,7 @@
 | `max_image_bytes` | 5242880 | 单张图像（base64 解码后）大小上限，超限 413（v1.1 多模态） |
 | `max_tracked_keys` | 100 | `gateway_key_cost_usd_total` 的 key 标签基数上限，超限聚合 `other` |
 | `tokenizer` / `tokenizer_model` | unicode / gpt-4o-mini | 估算器：`unicode`（CJK 感知启发式）或 `tiktoken`（需 `[tokenizer]` extra，离线自动回退） |
+| `passthrough.enabled` | false | **v1.2** 逃生通道：`/v1/upstream/{model}/{path}` 原样透传请求到上游（GET/POST，JSON 体）。身份治理仍生效（虚拟 key 认证/模型白名单/预算/限流/并发/日志/指标）；schema 校验、两级缓存、canary、流式内容过滤不生效。上游 4xx/5xx 原样回传；仅 openai/anthropic 类型上游支持 |
 
 ## providers
 
