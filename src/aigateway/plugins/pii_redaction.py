@@ -87,11 +87,15 @@ class PiiRedactionPlugin(Plugin):
         return None
 
     def mask_text(self, text: str) -> str:
+        replacement = self.replacement
+
+        def repl(match: re.Match[str]) -> str:
+            if replacement is None:
+                return self.mask_char * len(match.group(0))
+            return match.expand(replacement)
+
         for pattern in self._compiled:
-            if self.replacement is None:
-                text = pattern.sub(lambda m, c=self.mask_char: c * len(m.group(0)), text)
-            else:
-                text = pattern.sub(lambda m, t=self.replacement: m.expand(t), text)
+            text = pattern.sub(repl, text)
         return text
 
     # -- hooks -----------------------------------------------------------------

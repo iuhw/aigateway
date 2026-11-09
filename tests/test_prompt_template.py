@@ -7,6 +7,8 @@ import pytest
 from aigateway.app import GatewayApp
 from tests.conftest import base_config, write_config
 
+pytestmark = pytest.mark.unit
+
 PAYLOAD = {"model": "m1", "messages": [{"role": "user", "content": "hi"}]}
 
 

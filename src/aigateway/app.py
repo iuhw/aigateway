@@ -9,14 +9,14 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
 from aigateway.config import ConfigWatcher, GatewayConfig
 from aigateway.core.dispatcher import RETRYABLE_STATUSES, Dispatcher
-from aigateway.core.provider import Provider, UpstreamUnavailable
-from aigateway.core.router import Router
+from aigateway.core.provider import Provider, RawRequestProvider, UpstreamUnavailable
+from aigateway.core.router import Deployment, ModelRoute, Router
 from aigateway.errors import (
     AllDeploymentsFailedError,
     BadRequestError,
@@ -161,7 +161,7 @@ class GatewayApp:
                 vectors = [d.get("embedding") for d in data or [] if isinstance(d, dict)]
                 if len(vectors) != len(texts) or any(not isinstance(v, list) for v in vectors):
                     return None
-                return vectors
+                return [v for v in vectors if isinstance(v, list)]
             except Exception:  # noqa: BLE001 - embed failure is never request-fatal
                 logger.exception("plugin embed via %r failed; bypassing", embed_model)
                 return None
@@ -397,7 +397,7 @@ class GatewayApp:
                 self._metrics_finish(ctx)
                 await self.state.plugins.run_response(ctx)
                 self._release_concurrency(ctx)
-                return ctx.response  # type: ignore[return-value]
+                return ctx.response
 
             if request.stream:
                 return self._chat_streaming(ctx, route, started)
@@ -443,7 +443,7 @@ class GatewayApp:
                 self._metrics_finish(ctx)
                 await self.state.plugins.run_response(ctx)
                 self._release_concurrency(ctx)
-                return ctx.response  # type: ignore[return-value]
+                return ctx.response
 
             ctx.upstream_started_at = time.perf_counter()
             try:
@@ -489,6 +489,77 @@ class GatewayApp:
         section = (self._server_limits() or {}).get("passthrough")
         return isinstance(section, dict) and bool(section.get("enabled"))
 
+    def _passthrough_route(self, model_name: str) -> ModelRoute:
+        """Enabled-flag and model-route checks for a tunnel request."""
+        if not self._passthrough_enabled():
+            raise NotFoundError("passthrough is not enabled on this gateway")
+        route = self.state.router.route(model_name)
+        if route is None:
+            raise NotFoundError(f"model {model_name!r} is not configured")
+        return route
+
+    def _passthrough_upstream(
+        self, route: ModelRoute, model_name: str
+    ) -> tuple[Deployment, RawRequestProvider]:
+        """Pick a healthy deployment; only openai/anthropic providers speak request_raw."""
+        deployment = self.state.router.pick(route, exclude=set())
+        if deployment is None:
+            raise AllDeploymentsFailedError(f"no healthy deployment for model {model_name!r}")
+        provider = self.state.providers.get(deployment.provider)
+        if provider is None or not hasattr(provider, "request_raw"):
+            raise BadRequestError(
+                f"provider {deployment.provider!r} of model {model_name!r} "
+                "does not support passthrough (openai/anthropic upstreams only)"
+            )
+        return deployment, cast(RawRequestProvider, provider)
+
+    @staticmethod
+    def _passthrough_body_out(
+        body_bytes: bytes | None, body_dict: Any, deployment: Deployment
+    ) -> bytes | None:
+        """Rewrite JSON bodies' `model` to the upstream name; raw bytes pass verbatim."""
+        if isinstance(body_dict, dict) and isinstance(body_dict.get("model"), str):
+            return json.dumps({**body_dict, "model": deployment.model}, ensure_ascii=False).encode()
+        return body_bytes
+
+    async def _passthrough_relay(
+        self,
+        ctx: PluginContext,
+        model_name: str,
+        route: ModelRoute,
+        deployment: Deployment,
+        response: httpx.Response,
+        relay_headers: dict[str, str],
+        upstream_latency_s: float,
+        started: float,
+    ) -> PassthroughResult:
+        """Consume a non-streaming tunnel response: routing feedback, plugin
+        on_response chain, metrics. Streaming responses are handled by
+        _passthrough_stream instead."""
+        try:
+            data = await response.aread()
+        finally:
+            await response.aclose()
+        ctx.upstream_ended_at = time.perf_counter()
+        ctx.latency_s = time.perf_counter() - started
+        ctx.status_code = response.status_code
+        if response.status_code < 400:
+            self.state.router.report_success(deployment, upstream_latency_s)
+        elif response.status_code in RETRYABLE_STATUSES:
+            # only upstream-side failures cool the deployment down; client
+            # errors on tunnel paths are the caller's, not the route's
+            self.state.router.report_failure(deployment, route)
+        if response.status_code < 400:
+            self._passthrough_settle(ctx, data)
+            try:
+                await self.state.plugins.run_response(ctx)
+            except GatewayError:
+                ctx.response = None
+                raise
+        self.metrics.inc_passthrough(model_name)
+        self._passthrough_metrics(ctx)
+        return PassthroughResult(status=response.status_code, headers=relay_headers, body=data)
+
     async def passthrough(
         self,
         *,
@@ -525,28 +596,13 @@ class GatewayApp:
         streaming = False
 
         try:
-            if not self._passthrough_enabled():
-                raise NotFoundError("passthrough is not enabled on this gateway")
-            route = self.state.router.route(model_name)
-            if route is None:
-                raise NotFoundError(f"model {model_name!r} is not configured")
+            route = self._passthrough_route(model_name)
 
             await self.state.plugins.run_request(ctx)
             self._acquire_concurrency(ctx)
 
-            deployment = self.state.router.pick(route, exclude=set())
-            if deployment is None:
-                raise AllDeploymentsFailedError(f"no healthy deployment for model {model_name!r}")
-            provider = self.state.providers.get(deployment.provider)
-            if provider is None or not hasattr(provider, "request_raw"):
-                raise BadRequestError(
-                    f"provider {deployment.provider!r} of model {model_name!r} "
-                    "does not support passthrough (openai/anthropic upstreams only)"
-                )
-
-            body_out = body_bytes
-            if isinstance(body_dict, dict) and isinstance(body_dict.get("model"), str):
-                body_out = json.dumps({**body_dict, "model": deployment.model}, ensure_ascii=False).encode()
+            deployment, provider = self._passthrough_upstream(route, model_name)
+            body_out = self._passthrough_body_out(body_bytes, body_dict, deployment)
 
             ctx.route = route
             ctx.deployment = deployment
@@ -563,7 +619,7 @@ class GatewayApp:
             except UpstreamUnavailable:
                 self.state.router.report_failure(deployment, route)
                 raise
-            latency = time.perf_counter() - started
+            upstream_latency_s = time.perf_counter() - started
 
             relay_headers = {
                 name: value
@@ -581,32 +637,9 @@ class GatewayApp:
                     headers=relay_headers,
                     stream=self._passthrough_stream(ctx, response, route, started),
                 )
-
-            try:
-                data = await response.aread()
-            finally:
-                await response.aclose()
-            ctx.upstream_ended_at = time.perf_counter()
-            ctx.latency_s = time.perf_counter() - started
-            ctx.status_code = response.status_code
-            if response.status_code < 400:
-                self.state.router.report_success(deployment, latency)
-            elif response.status_code in RETRYABLE_STATUSES:
-                # only upstream-side failures cool the deployment down; client
-                # errors on tunnel paths are the caller's, not the route's
-                self.state.router.report_failure(deployment, route)
-
-            if response.status_code < 400:
-                self._passthrough_settle(ctx, data)
-                try:
-                    await self.state.plugins.run_response(ctx)
-                except GatewayError:
-                    ctx.response = None
-                    raise
-            self.metrics.inc_passthrough(model_name)
-            self._passthrough_metrics(ctx)
-            return PassthroughResult(
-                status=response.status_code, headers=relay_headers, body=data
+            return await self._passthrough_relay(
+                ctx, model_name, route, deployment, response, relay_headers,
+                upstream_latency_s, started,
             )
         except GatewayError as exc:
             self._finish_error(ctx, exc, started)

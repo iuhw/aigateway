@@ -9,6 +9,8 @@ from aigateway.core.router import RoutingStrategy
 from aigateway.errors import BadRequestError
 from tests.conftest import base_config, write_config
 
+pytestmark = pytest.mark.unit
+
 
 def test_load_config_builds_state(tmp_path):
     config = load_config(write_config(tmp_path, base_config()))

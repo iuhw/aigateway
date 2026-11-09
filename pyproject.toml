@@ -1,6 +1,6 @@
 [project]
 name = "aigateway"
-version = "1.2.0"
+version = "1.2.1"
 description = "A production-grade, extensible AI gateway exposing an OpenAI-compatible API with pluggable middleware (keyword filtering, rate limiting, auth, caching, observability)."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -17,7 +17,10 @@ dependencies = [
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
     "ruff>=0.5",
+    "mypy>=1.11",
+    "types-PyYAML>=6.0",
     "fakeredis>=2.26",
     "psutil>=6.0",
     "opentelemetry-sdk>=1.26,<2",
@@ -47,6 +50,25 @@ packages = ["src/aigateway"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "unit: component-level tests (providers, router, plugins, estimators in isolation)",
+    "integration: full app pipeline via create_app + ASGI transport",
+]
+
+[tool.mypy]
+python_version = "3.12"
+# Scope: the gateway package only (tests exercise behavior, not types).
+files = ["src/aigateway"]
+# Third-party untyped deps are isolated at the boundary; stricter settings can
+# be adopted incrementally as annotations allow.
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+module = "tiktoken"
+# optional [tokenizer] extra: absent unless precise counting is enabled
+ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 110

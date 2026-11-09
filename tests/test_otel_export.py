@@ -20,6 +20,8 @@ from aigateway.plugins.otel_export import (
 )
 from tests.conftest import base_config, write_config
 
+pytestmark = pytest.mark.unit
+
 ENDPOINT = "http://127.0.0.1:4318/v1/traces"
 
 

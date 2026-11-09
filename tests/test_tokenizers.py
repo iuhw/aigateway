@@ -9,6 +9,8 @@ from aigateway.tokenizers import (
     build_tokenizer,
 )
 
+pytestmark = pytest.mark.unit
+
 
 def test_empty_and_short_strings():
     est = UnicodeHeuristicEstimator()

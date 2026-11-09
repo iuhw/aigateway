@@ -22,6 +22,8 @@ exact-duplicate prompts are left to response-cache-plugin, which runs first.
 from __future__ import annotations
 
 import hashlib
+import heapq
+import itertools
 import json
 import logging
 import time
@@ -109,8 +111,13 @@ class SemanticCachePlugin(Plugin):
         self.embed_fn: EmbedFn | None = None
         self._backend: Any = None  # shared-state backend (optional)
         self._metrics: Any = None
-        # namespace -> key -> (deadline, vector, payload); used when no shared backend
-        self._store: dict[str, dict[str, tuple[float, list[float], dict[str, Any]]]] = {}
+        # namespace -> key -> (deadline, seq, vector, payload); used when no shared backend
+        self._store: dict[str, dict[str, tuple[float, int, list[float], dict[str, Any]]]] = {}
+        # lazy min-heap of (deadline, seq, namespace, key) mirroring _store for
+        # O(log n) eviction; a node is live only when BOTH deadline and seq match
+        # the stored entry (equal deadlines still order by insertion via seq)
+        self._evict_heap: list[tuple[float, int, str, str]] = []
+        self._seq = itertools.count()
         if not self.embed_model:
             logger.warning(
                 "semantic-cache-plugin disabled: 'embed_model' is required "
@@ -134,15 +141,20 @@ class SemanticCachePlugin(Plugin):
         return sum(len(entries) for entries in self._store.values())
 
     def _evict_if_needed(self) -> None:
+        # Heap nodes can be stale (entry overwritten by a later put, or already
+        # TTL-purged by _search): only delete when the stored entry still
+        # matches on BOTH deadline and seq, then pop the next candidate.
         while self._entry_count() > self.max_entries:
-            oldest_ns, oldest_key, oldest_deadline = None, None, None
-            for namespace, entries in self._store.items():
-                for key, (deadline, _vector, _payload) in entries.items():
-                    if oldest_deadline is None or deadline < oldest_deadline:
-                        oldest_ns, oldest_key, oldest_deadline = namespace, key, deadline
-            if oldest_ns is None:
-                return
-            del self._store[oldest_ns][oldest_key]
+            while self._evict_heap:
+                deadline, seq, namespace, key = heapq.heappop(self._evict_heap)
+                entry = self._store.get(namespace, {}).get(key)
+                if entry is not None and entry[0] == deadline and entry[1] == seq:
+                    del self._store[namespace][key]
+                    if not self._store[namespace]:
+                        del self._store[namespace]
+                    break
+            else:
+                return  # heap drained: nothing left to evict
 
     async def _search(
         self, namespace: str, vector: list[float]
@@ -158,7 +170,7 @@ class SemanticCachePlugin(Plugin):
             return []
         now = time.monotonic()
         scored: list[tuple[float, str, dict[str, Any]]] = []
-        for key, (deadline, entry_vector, payload) in list(entries.items()):
+        for key, (deadline, _seq, entry_vector, payload) in list(entries.items()):
             if deadline <= now:
                 del entries[key]
                 continue
@@ -180,7 +192,10 @@ class SemanticCachePlugin(Plugin):
             except Exception:  # noqa: BLE001
                 logger.exception("semantic cache backend put failed; skipping fill")
             return
-        self._store.setdefault(namespace, {})[key] = (time.monotonic() + self.ttl_s, vector, body)
+        deadline = time.monotonic() + self.ttl_s
+        seq = next(self._seq)
+        self._store.setdefault(namespace, {})[key] = (deadline, seq, vector, body)
+        heapq.heappush(self._evict_heap, (deadline, seq, namespace, key))
         self._evict_if_needed()
 
     async def _safe_embed(self, texts: list[str]) -> list[list[float]] | None:

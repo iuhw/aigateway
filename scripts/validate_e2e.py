@@ -722,7 +722,15 @@ async def check_27_vision_openai_entry(client: httpx.AsyncClient) -> None:
 
 async def check_28_vision_anthropic_entry(client: httpx.AsyncClient) -> None:
     """v1.1: the same image through /v1/messages (Anthropic base64 image
-    source translated to an OpenAI image part upstream); up to 3 attempts."""
+    source translated to an OpenAI image part upstream); up to 3 attempts.
+
+    Block order is text-first. The Anthropic protocol allows any order and the
+    gateway translates order-preserving (covered per-block by unit tests), but
+    this runner's moondream mishandles image-first content — hitting Ollama's
+    /v1/chat/completions DIRECTLY with [image, text] returns garbled one-token
+    answers ('irt') or empty output while [text, image] identifies the color
+    correctly (measured 2026-11-09; also what broke the 2026-11-08 v1.2.0 run,
+    then mis-attributed to generic runner degradation)."""
     # ollama 0.40.10/llama.cpp degrades moondream after its first image
     # inference(s) on a loaded runner (empty/garbled output); a fresh solo
     # load answers sanely — reload before the check (see _unload_ollama_models).
@@ -743,12 +751,12 @@ async def check_28_vision_anthropic_entry(client: httpx.AsyncClient) -> None:
                         "role": "user",
                         "content": [
                             {
-                                "type": "image",
-                                "source": {"type": "base64", "media_type": "image/png", "data": BLUE_PNG_B64},
-                            },
-                            {
                                 "type": "text",
                                 "text": "What is the main color of this image? Answer with just the color word.",
+                            },
+                            {
+                                "type": "image",
+                                "source": {"type": "base64", "media_type": "image/png", "data": BLUE_PNG_B64},
                             },
                         ],
                     }

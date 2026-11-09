@@ -24,6 +24,8 @@ from aigateway.core.gemini_provider import GeminiProvider, from_gemini_response,
 from aigateway.core.sigv4 import sigv4_headers
 from tests.conftest import base_config, write_config
 
+pytestmark = pytest.mark.integration
+
 OPENAI_PAYLOAD = {
     "messages": [{"role": "user", "content": "hi"}],
     "stream": False,

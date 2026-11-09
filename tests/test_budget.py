@@ -16,6 +16,8 @@ from aigateway.api import create_app
 from aigateway.plugins.auth import _key_hash, _window_keys
 from tests.conftest import base_config, write_config
 
+pytestmark = pytest.mark.integration
+
 
 def make_client(tmp_path, config) -> httpx.AsyncClient:
     app = create_app(write_config(tmp_path, config), config_watcher=False)

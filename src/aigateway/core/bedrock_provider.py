@@ -208,7 +208,7 @@ def from_converse_response(body: dict[str, Any], *, model: str) -> dict[str, Any
             {
                 "index": 0,
                 "message": message,
-                "finish_reason": BEDROCK_STOP_REASON_TO_OPENAI.get(body.get("stopReason"), "stop"),
+                "finish_reason": BEDROCK_STOP_REASON_TO_OPENAI.get(str(body.get("stopReason")), "stop"),
             }
         ],
         "usage": _openai_usage(
@@ -344,8 +344,10 @@ class BedrockProvider(Provider):
                     status=result.status, body=result.body, latency_s=time.perf_counter() - started
                 )
             raw = result.body.get("embeddings")
-            vectors = [v for v in raw if isinstance(v, list)] if isinstance(raw, list) else []
-            if len(vectors) != len(texts):
+            embed_vectors: list[list[float]] = (
+                [v for v in raw if isinstance(v, list)] if isinstance(raw, list) else []
+            )
+            if len(embed_vectors) != len(texts):
                 return ProviderResult(
                     status=502,
                     body={
@@ -356,7 +358,7 @@ class BedrockProvider(Provider):
                     },
                     latency_s=time.perf_counter() - started,
                 )
-            body = embedding_list_body(model=model, vectors=vectors, texts=texts)
+            body = embedding_list_body(model=model, vectors=embed_vectors, texts=texts)
             return ProviderResult(status=200, body=body, latency_s=time.perf_counter() - started)
 
         vectors: list[list[float]] = []
@@ -474,8 +476,8 @@ class BedrockProvider(Provider):
                             yield _chunk(chunk_id, model, created, {"content": delta["text"]})
                         tool_delta = delta.get("toolUse") or {}
                         if tool_delta.get("input"):
-                            call_index = block_to_call.get(block_index)
-                            if call_index is not None:
+                            mapped_index = block_to_call.get(block_index)
+                            if mapped_index is not None:
                                 yield _chunk(
                                     chunk_id,
                                     model,
@@ -483,7 +485,7 @@ class BedrockProvider(Provider):
                                     {
                                         "tool_calls": [
                                             {
-                                                "index": call_index,
+                                                "index": mapped_index,
                                                 "function": {"arguments": tool_delta["input"]},
                                             }
                                         ]
@@ -492,7 +494,9 @@ class BedrockProvider(Provider):
                     elif isinstance(event.get("messageDelta"), dict):
                         message_delta = event["messageDelta"]
                         stop = (message_delta.get("delta") or {}).get("stopReason")
-                        finish_reason = BEDROCK_STOP_REASON_TO_OPENAI.get(stop, finish_reason)
+                        mapped = BEDROCK_STOP_REASON_TO_OPENAI.get(str(stop)) if stop else None
+                        if mapped is not None:
+                            finish_reason = mapped
                         if isinstance(message_delta.get("usage"), dict):
                             output_tokens = message_delta["usage"].get("outputTokens", output_tokens)
                     elif isinstance(event.get("metadata"), dict):

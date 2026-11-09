@@ -15,6 +15,8 @@ from aigateway.schemas import (
     set_response_text,
 )
 
+pytestmark = pytest.mark.unit
+
 
 def test_minimal_request_ok():
     request = ChatCompletionRequest(model="m", messages=[{"role": "user", "content": "hi"}])

@@ -20,6 +20,8 @@ from aigateway.errors import BadRequestError
 from aigateway.plugins.base import PluginContext
 from aigateway.plugins.prompt_template import PromptTemplatePlugin
 
+pytestmark = pytest.mark.unit
+
 MARKER = {"type": "ephemeral"}
 
 

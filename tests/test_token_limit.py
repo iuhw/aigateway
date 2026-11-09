@@ -14,6 +14,8 @@ from aigateway.plugins.rate_limit import RateLimitPlugin
 from aigateway.schemas import estimate_tokens, request_text
 from aigateway.state import RedisBackend
 
+pytestmark = pytest.mark.unit
+
 
 def make_ctx(payload: dict, identity: dict | None = None) -> PluginContext:
     return PluginContext(

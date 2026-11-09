@@ -239,10 +239,25 @@ v0.1 现状 ──► M1 治理 ──► M2 缓存 ──► M3 安全 ──�
     非 system 消息、system 并入分区指纹）；388 tests；报告见 docs/full-validation-report.md；
   - 版本 v1.0.0。
 
-### 探索池（v1.x+，不承诺排序）
+### 探索池（v1.x+，按 gap-analysis-2026-11 建议序）
 
-多模态输入（图像/音频，schemas 扩展）；批处理/离线异步接口；**MCP Server 托管与工具治理**；
-**Agent 网关**（会话亲和、Agent 身份）；内置向量检索升级（RedisVL/专用索引）；控制台 UI。
+> 2026-11-08 功能复盘与行业差距分析（[gap-analysis-2026-11.md](gap-analysis-2026-11.md)）后的重排：
+> 基线 14 条尚缺 3（Responses API / 批处理 / Realtime），MCP 为竞争主战场。顺序为建议序，
+> 单项启动时仍按里程碑纪律单独立项（失败模型文档 + 验证门槛）。
+
+1. **会话亲和 / Agent 网关切片**（gap #18，v1.2 提案在案）——长任务会话粘性、Agent 身份；
+2. **Responses API 透传**（gap #2，**最大基线缺口**）——第一期 OpenAI 兼容上游直通；
+   `previous_response_id` 后端粘性 × fallback 的交互必须先写失败模型文档；翻译层后置；
+3. **MCP 治理切片**（gap #15/16/23，竞争主战场）——按 MCP 2026-07-28 无状态规范设计
+   （`Mcp-Method`/`Mcp-Name` 头免解析路由计量）、per-tool ACL/限流/审计、Registry 发现；
+   端点代理优先、Server 托管后置；
+4. **批处理 `/v1/batches` + `/v1/files`**（gap #12）——先 OpenAI 兼容上游；
+5. **控制台 UI**——功能上非核心、采用上是核心（零构建链方案）；
+6. **Realtime/语音 WebSocket**（gap #14）——视用户场景决定先后。
+
+次级池（有它才"全"，非准入门槛）：token 级实时限流口径、team 聚合 showback、密钥托管引用/
+轮换宽限、护栏生态 preset、音频输入/rerank、cost-based LB、prompt-cache 命中率指标、
+语义缓存专用向量索引。
 
 ### v1.1（探索池第一项：多模态输入-图像）✅（2026-11-08 交付）
 

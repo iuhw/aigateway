@@ -63,8 +63,11 @@ def _key_hash(raw_key: str) -> str:
     return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
 
-def _window_keys(name: str, now: datetime) -> list[tuple[str, str, int, float]]:
-    """(window_key, label, ttl_s, budget_field) for the active UTC windows."""
+def _window_keys(name: str, now: datetime) -> list[tuple[str, str, int, str]]:
+    """(window_key, label, ttl_s, budget_field) for the active UTC windows.
+
+    budget_field names the identity's budgets dict key ("daily_usd"/"monthly_usd"),
+    not a monetary value."""
     day = now.strftime("%Y-%m-%d")
     month = now.strftime("%Y-%m")
     return [

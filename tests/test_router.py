@@ -8,6 +8,8 @@ import pytest
 
 from aigateway.core.router import Deployment, ModelRoute, RoutePolicy, Router, RoutingStrategy
 
+pytestmark = pytest.mark.unit
+
 
 def make_router(strategy=RoutingStrategy.ROUND_ROBIN, **policy_kwargs) -> tuple[Router, ModelRoute]:
     route = ModelRoute(

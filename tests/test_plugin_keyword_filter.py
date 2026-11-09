@@ -8,6 +8,8 @@ from aigateway.errors import ContentFilterError
 from aigateway.plugins.base import PluginContext
 from aigateway.plugins.keyword_filter import KeywordFilterPlugin
 
+pytestmark = pytest.mark.unit
+
 
 def make_ctx(payload: dict, stream: bool = False) -> PluginContext:
     return PluginContext(request_id="r1", model="m1", payload=payload, stream=stream)

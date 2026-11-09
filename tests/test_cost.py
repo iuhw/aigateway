@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from aigateway.api import create_app
 from tests.conftest import base_config, write_config
+
+pytestmark = pytest.mark.integration
 
 
 def make_client(tmp_path, config) -> httpx.AsyncClient:

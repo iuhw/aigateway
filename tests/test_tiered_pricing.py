@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from aigateway.api import create_app
 from aigateway.core.anthropic_provider import from_anthropic_response
@@ -10,6 +11,8 @@ from aigateway.core.bedrock_provider import from_converse_response
 from aigateway.core.gemini_provider import from_gemini_response
 from aigateway.schemas import cache_tokens_of
 from tests.conftest import base_config, write_config
+
+pytestmark = pytest.mark.integration
 
 
 def make_client(tmp_path, config) -> httpx.AsyncClient:

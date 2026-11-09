@@ -14,6 +14,8 @@ from aigateway.plugins.semantic_cache import partition_key
 from aigateway.schemas import extract_images, image_data_bytes, image_fingerprint
 from tests.conftest import base_config, write_config
 
+pytestmark = pytest.mark.unit
+
 B64 = "aGVsbG8="  # tiny stand-in payload
 
 

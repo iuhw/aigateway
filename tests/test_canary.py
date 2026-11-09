@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import pytest
+
 from aigateway.app import GatewayApp
 from aigateway.core.router import CanaryRule, Deployment, ModelRoute, RoutePolicy, Router
 from aigateway.errors import BadRequestError
 from tests.conftest import base_config, write_config
+
+pytestmark = pytest.mark.unit
 
 PAYLOAD = {"model": "m1", "messages": [{"role": "user", "content": "hi"}]}
 

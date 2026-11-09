@@ -10,6 +10,8 @@ from aigateway.plugins.base import PluginContext
 from aigateway.plugins.rate_limit import RateLimitPlugin, TokenBucket
 from aigateway.plugins.response_cache import ResponseCachePlugin, cache_key
 
+pytestmark = pytest.mark.unit
+
 
 def ctx(model="m1", headers=None, identity=None) -> PluginContext:
     return PluginContext(

@@ -178,8 +178,8 @@ def from_gemini_embedding(body: dict[str, Any], *, model: str, texts: list[str])
         return None
     embeddings = body.get("embeddings")  # batchEmbedContents
     if isinstance(embeddings, list):
-        vectors = [
-            e.get("values") for e in embeddings if isinstance(e, dict) and isinstance(e.get("values"), list)
+        vectors: list[list[float]] = [
+            e["values"] for e in embeddings if isinstance(e, dict) and isinstance(e.get("values"), list)
         ]
         if len(vectors) == len(texts) and texts:
             return embedding_list_body(model=model, vectors=vectors, texts=texts)
@@ -226,7 +226,7 @@ def from_gemini_response(body: dict[str, Any], *, model: str) -> dict[str, Any]:
             {
                 "index": 0,
                 "message": message,
-                "finish_reason": GEMINI_FINISH_TO_OPENAI.get(candidate.get("finishReason"), "stop"),
+                "finish_reason": GEMINI_FINISH_TO_OPENAI.get(str(candidate.get("finishReason")), "stop"),
             }
         ],
         "usage": openai_usage,
@@ -349,7 +349,7 @@ class GeminiProvider(Provider):
                         continue
                     candidate = _candidate_of(event)
                     delta: dict[str, Any] = {}
-                    finish_reason = GEMINI_FINISH_TO_OPENAI.get(candidate.get("finishReason"))
+                    finish_reason = GEMINI_FINISH_TO_OPENAI.get(str(candidate.get("finishReason")))
                     parts = ((candidate.get("content") or {}).get("parts")) or []
                     for part in parts:
                         if isinstance(part.get("text"), str) and part["text"]:

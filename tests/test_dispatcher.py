@@ -9,6 +9,8 @@ from aigateway.core.mock_provider import MockProvider
 from aigateway.core.router import Deployment, ModelRoute, RoutePolicy, Router
 from aigateway.errors import AllDeploymentsFailedError, UpstreamError
 
+pytestmark = pytest.mark.unit
+
 
 def build(providers: dict, routes: dict) -> Dispatcher:
     router = Router(routes)

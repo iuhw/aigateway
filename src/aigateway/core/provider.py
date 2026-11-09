@@ -12,7 +12,9 @@ import json
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
+
+import httpx
 
 from aigateway.errors import GatewayError
 
@@ -44,6 +46,22 @@ class UpstreamStreamError(Exception):
         self.status_code = status_code
         self.body_text = body_text
         super().__init__(f"upstream stream error {status_code}: {body_text}")
+
+
+class RawRequestProvider(Protocol):
+    """Capability protocol: providers that can relay arbitrary raw HTTP requests
+    (the /v1/upstream passthrough escape hatch). Structural — openai/anthropic
+    providers satisfy it by implementing `request_raw`; others simply don't."""
+
+    async def request_raw(
+        self,
+        *,
+        method: str,
+        path: str,
+        query: str = "",
+        body: bytes | None = None,
+        timeout: float,
+    ) -> httpx.Response: ...
 
 
 class Provider(ABC):

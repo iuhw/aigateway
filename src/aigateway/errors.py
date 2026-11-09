@@ -8,6 +8,9 @@ class GatewayError(Exception):
 
     status_code: int = 500
     code: str = "internal_error"
+    #: Set by PluginChain when a plugin hook raised this — names the rejecting
+    #: plugin in logs and error responses ("rejected_by" field).
+    plugin_name: str | None = None
 
     def __init__(self, message: str, *, code: str | None = None, status_code: int | None = None):
         super().__init__(message)

@@ -14,6 +14,8 @@ from aigateway.plugins.base import PluginContext
 from aigateway.plugins.webhook_review import WebhookReviewPlugin
 from tests.conftest import base_config, write_config
 
+pytestmark = pytest.mark.integration
+
 URL = "http://review.internal/check"
 
 

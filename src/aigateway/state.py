@@ -325,10 +325,13 @@ class RedisBackend(StateBackend):
         try:
             full_prefix = f"{self._cooldown_prefix()}{prefix}"
             names: list[str] = []
-            cursor: int | str = 0
+            cursor = 0
             while True:
-                cursor, keys = await self._redis.scan(cursor=cursor, match=f"{full_prefix}*", count=100)
-                names.extend(keys)
+                # redis-py types the scan cursor/keys loosely (int|str / bytes|str);
+                # this client is decode_responses=True, so normalize to int/str
+                scan = await self._redis.scan(cursor=cursor, match=f"{full_prefix}*", count=100)
+                cursor = int(scan[0])
+                names.extend(str(key) for key in scan[1])
                 if cursor == 0:
                     break
             result: dict[str, float] = {}
@@ -409,10 +412,11 @@ class RedisBackend(StateBackend):
         try:
             prefix = self._vec_prefix(namespace)
             keys: list[str] = []
-            cursor: int | str = 0
+            cursor = 0
             while True:
-                cursor, batch = await self._redis.scan(cursor=cursor, match=f"{prefix}*", count=100)
-                keys.extend(batch)
+                result = await self._redis.scan(cursor=cursor, match=f"{prefix}*", count=100)
+                cursor = int(result[0])
+                keys.extend(str(key) for key in result[1])
                 if cursor == 0:
                     break
             scored: list[tuple[float, str, dict[str, Any]]] = []
@@ -441,7 +445,7 @@ class RedisBackend(StateBackend):
     async def get_dynamic_keys(self) -> dict[str, dict[str, Any]]:
         try:
             raw = await self._redis.hgetall(self._dynkeys_name())
-            return {name: json.loads(record) for name, record in raw.items()}
+            return {str(name): json.loads(record) for name, record in raw.items()}
         except Exception as exc:  # noqa: BLE001
             raise StateBackendError(f"redis get_dynamic_keys failed: {exc}") from exc
 

@@ -17,6 +17,8 @@ from aigateway.api import create_app
 from aigateway.core.openai_provider import OpenAICompatibleProvider
 from tests.conftest import base_config, write_config
 
+pytestmark = pytest.mark.integration
+
 UPSTREAM = "http://upstream.test/v1"
 
 

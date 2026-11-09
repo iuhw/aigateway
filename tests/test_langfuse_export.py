@@ -11,6 +11,8 @@ from aigateway.plugins.langfuse_export import LangfuseExportPlugin
 from aigateway.plugins.otel_export import REQUEST_SPAN_CHAT, OtelExportPlugin
 from tests.conftest import base_config, write_config
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture
 def span_exporter(monkeypatch) -> InMemorySpanExporter:

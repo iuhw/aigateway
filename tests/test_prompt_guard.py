@@ -13,6 +13,8 @@ from aigateway.plugins.base import PluginContext
 from aigateway.plugins.prompt_guard import PromptGuardPlugin
 from tests.conftest import base_config, write_config
 
+pytestmark = pytest.mark.integration
+
 # ---- sample sets (blueprint M3 acceptance: injection hit-rate / FP statistics) -----------
 # Every injection sample must reach the default threshold (1.0) — either one
 # 1.0-weight rule or two corroborating 0.5-weight rules. This is the FN gate.

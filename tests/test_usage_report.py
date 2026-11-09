@@ -6,11 +6,14 @@ import asyncio
 import time
 
 import httpx
+import pytest
 
 from aigateway.api import create_app
 from aigateway.app import GatewayApp
 from aigateway.plugins.usage_report import UsageReportPlugin, _Record
 from tests.conftest import base_config, write_config
+
+pytestmark = pytest.mark.integration
 
 PAYLOAD = {"model": "m1", "messages": [{"role": "user", "content": "hi"}]}
 

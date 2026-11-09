@@ -13,6 +13,8 @@ from aigateway.plugins.pii_redaction import PiiRedactionPlugin
 from aigateway.schemas import chunk_text
 from tests.conftest import base_config, write_config
 
+pytestmark = pytest.mark.integration
+
 PHONE = "13812345678"
 EMAIL = "alice@example.com"
 ID_CARD = "11010519491231002X"  # valid GB11643 checksum

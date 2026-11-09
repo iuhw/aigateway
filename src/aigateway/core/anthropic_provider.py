@@ -139,7 +139,7 @@ def to_anthropic_request(
                 if part.get("type") == "text":
                     text = str(part.get("text", ""))
                     if text:
-                        text_block: dict[str, Any] = {"type": "text", "text": text}
+                        text_block = {"type": "text", "text": text}
                         if marker:
                             text_block["cache_control"] = marker
                         user_blocks.append(text_block)
@@ -257,7 +257,7 @@ def from_anthropic_response(body: dict[str, Any], *, model: str) -> dict[str, An
             {
                 "index": 0,
                 "message": message,
-                "finish_reason": ANTHROPIC_STOP_REASON_TO_OPENAI.get(body.get("stop_reason"), "stop"),
+                "finish_reason": ANTHROPIC_STOP_REASON_TO_OPENAI.get(str(body.get("stop_reason")), "stop"),
             }
         ],
         "usage": _openai_usage(
@@ -370,14 +370,14 @@ async def anthropic_stream_to_openai(
             if delta.get("type") == "text_delta" and delta.get("text"):
                 yield _openai_chunk(chunk_id, model, {"content": delta["text"]}, created=created)
             elif delta.get("type") == "input_json_delta" and delta.get("partial_json"):
-                call_index = block_to_call.get(int(event.get("index") or 0))
-                if call_index is not None:
+                mapped_index = block_to_call.get(int(event.get("index") or 0))
+                if mapped_index is not None:
                     yield _openai_chunk(
                         chunk_id,
                         model,
                         {
                             "tool_calls": [
-                                {"index": call_index, "function": {"arguments": delta["partial_json"]}}
+                                {"index": mapped_index, "function": {"arguments": delta["partial_json"]}}
                             ]
                         },
                         created=created,

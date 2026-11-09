@@ -20,6 +20,8 @@ from aigateway.plugins.rate_limit import RateLimitPlugin
 from aigateway.state import RedisBackend, StateBackendError
 from tests.conftest import write_config
 
+pytestmark = pytest.mark.unit
+
 pytest.importorskip("fakeredis", reason="fakeredis not installed (dev extra)")
 
 

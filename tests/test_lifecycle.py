@@ -9,6 +9,8 @@ import pytest
 from aigateway.app import GatewayApp
 from tests.conftest import base_config, write_config
 
+pytestmark = pytest.mark.integration
+
 
 class SpyProvider:
     """Records aclose calls so shutdown can be asserted."""

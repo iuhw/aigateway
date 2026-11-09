@@ -7,10 +7,13 @@ import os
 import time
 from pathlib import Path
 
+import pytest
 import yaml
 
 from aigateway.app import GatewayApp
 from tests.conftest import base_config, write_config
+
+pytestmark = pytest.mark.unit
 
 
 def _force_distinct_mtime(path_obj: Path) -> None:

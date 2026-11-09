@@ -8,12 +8,15 @@ Threshold boundaries use the plugin directly with hand-built vectors.
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from aigateway.api import create_app
 from aigateway.app import GatewayApp
 from aigateway.plugins.semantic_cache import SemanticCachePlugin, messages_text, partition_key
 from aigateway.state import InMemoryBackend
 from tests.conftest import base_config, write_config
+
+pytestmark = pytest.mark.integration
 
 # ---- unit: partitioning & text extraction --------------------------------------------
 
@@ -173,6 +176,68 @@ async def test_plugin_in_memory_capacity_eviction():
         ctx.response, ctx.status_code = {"t": text}, 200
         await plugin.on_response(ctx)
     assert plugin._entry_count() == 1  # oldest evicted
+
+
+# ---- unit: lazy heap eviction edge cases ----------------------------------------------
+
+
+def _key_for(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+async def test_eviction_overwrite_ages_from_overwrite_moment():
+    """Same key put twice within one clock tick leaves a stale heap node (the
+    pre-overwrite one) and a live one. Eviction must (a) skip the stale node,
+    (b) treat the entry as aged from its OVERWRITE moment — here the overwrite
+    precedes "b"'s put in the same tick, so the overwritten "a" (seq order)
+    is older and evicted first, with no stale-node double deletion."""
+    plugin = make_plugin(max_entries=2)
+    await plugin._put("ns", "a", [1.0, 0.0], {"v": "a1"})
+    await plugin._put("ns", "a", [1.0, 0.0], {"v": "a2"})  # overwrite -> stale node for a1
+    await plugin._put("ns", "b", [0.0, 1.0], {"v": "b"})  # at capacity
+    plugin.max_entries = 1
+    plugin._evict_if_needed()  # a2 (older insertion) out; stale a1 node skipped on the way
+    entries = plugin._store["ns"]
+    assert _key_for("b") in entries and entries[_key_for("b")][3] == {"v": "b"}
+    assert _key_for("a") not in entries
+    assert plugin._entry_count() == 1
+
+
+async def test_eviction_skips_ttl_purged_entries(monkeypatch):
+    """Entries TTL-purged by _search leave stale heap nodes; eviction must skip
+    them instead of spinning or evicting live entries twice."""
+    import aigateway.plugins.semantic_cache as sc
+
+    real = sc.time.monotonic
+    t = real()
+    monkeypatch.setattr(sc.time, "monotonic", lambda: t)
+    plugin = make_plugin(max_entries=2)
+    await plugin._put("ns", "old", [1.0, 0.0], {"v": "old"})
+
+    monkeypatch.setattr(sc.time, "monotonic", lambda: t + 301)  # past ttl_s=300
+    await plugin._search("ns", [1.0, 0.0])  # TTL purge removes it from _store
+    assert plugin._entry_count() == 0
+
+    monkeypatch.setattr(sc.time, "monotonic", lambda: t + 302)
+    await plugin._put("ns", "new", [0.0, 1.0], {"v": "new"})
+    await plugin._put("ns", "newer", [1.0, 1.0], {"v": "newer"})  # heap: 1 stale + 2 live
+    plugin.max_entries = 1
+    plugin._evict_if_needed()  # stale node skipped, oldest live ("new") evicted
+    assert plugin._entry_count() == 1
+    assert _key_for("newer") in plugin._store["ns"]
+
+
+async def test_eviction_across_namespaces_and_empty_cleanup():
+    plugin = make_plugin(max_entries=2)
+    await plugin._put("ns1", "x", [1.0, 0.0], {"v": 1})
+    await plugin._put("ns2", "y", [0.0, 1.0], {"v": 2})
+    await plugin._put("ns3", "z", [1.0, 1.0], {"v": 3})  # over capacity: ns1/x oldest
+    assert plugin._entry_count() == 2
+    assert "ns1" not in plugin._store  # emptied namespace dict is removed
+    assert _key_for("y") in plugin._store["ns2"]
+    assert _key_for("z") in plugin._store["ns3"]
 
 
 def _ctx(payload):

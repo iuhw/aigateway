@@ -25,8 +25,11 @@ jobs:
       - name: Lint
         run: uv run --no-sync ruff check src tests scripts benchmarks
 
-      - name: Tests
-        run: uv run --no-sync python -m pytest tests/ -q
+      - name: Type check
+        run: uv run --no-sync mypy
+
+      - name: Tests (with coverage)
+        run: uv run --no-sync python -m pytest tests/ -q --cov=aigateway --cov-report=term --cov-report=xml:/tmp/coverage.xml
 
       - name: Benchmark smoke (small n, CI variance tolerated)
         run: uv run --no-sync python benchmarks/bench_gateway.py --quick --out /tmp/bench.md --json /tmp/bench.json
@@ -37,6 +40,13 @@ jobs:
         with:
           name: bench
           path: /tmp/bench.*
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: /tmp/coverage.xml
 
   docker:
     runs-on: ubuntu-latest

@@ -3,7 +3,7 @@
 > 调研截至 2026-11-08。对比对象：**LiteLLM v1.108 / Higress v2.2.5（CNCF Sandbox）/ Portkey（Prisma AIRS）/ Kong AI Gateway 2.3 / Cloudflare AI Gateway**，
 > 另加 2026 新格局扫描（agentgateway、Bifrost、Kuadrant 等）。口径：**核心功能完备性**——以
 > "2026 年末现代 AI 网关能力基线"为标尺逐条对照。本文是探索池重排与后续迭代的选型依据；
-> 蓝图探索池（BLUEPRINT.md）尚未按本文重排。
+> 蓝图探索池（BLUEPRINT.md §3）已按本文 §5 建议序重排（2026-11-09）。
 
 ## 1. 功能复盘：aigateway v1.1.0 现状
 

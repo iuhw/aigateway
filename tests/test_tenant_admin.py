@@ -20,6 +20,8 @@ from aigateway.api import create_app
 from aigateway.errors import BadRequestError
 from tests.conftest import base_config, write_config
 
+pytestmark = pytest.mark.integration
+
 PAYLOAD = {"model": "m1", "messages": [{"role": "user", "content": "hi"}]}
 AUTH = {"Authorization": "Bearer sk-k1"}
 

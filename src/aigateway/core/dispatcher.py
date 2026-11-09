@@ -15,14 +15,19 @@ For streams, failover only happens *before the first chunk* reaches the client.
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from aigateway.core.openai_provider import UpstreamStreamError
-from aigateway.core.provider import Provider, ProviderResult, UpstreamUnavailable
+from aigateway.core.provider import (
+    Provider,
+    ProviderResult,
+    UpstreamStreamError,
+    UpstreamUnavailable,
+)
 from aigateway.core.router import Deployment, ModelRoute, Router
 from aigateway.errors import AllDeploymentsFailedError, GatewayError, UpstreamError
 
@@ -271,8 +276,6 @@ def _upstream_error_code(body: dict[str, Any]) -> str:
 
 def _error_body_message(text: str) -> str:
     try:
-        import json
-
         parsed = json.loads(text)
         if isinstance(parsed, dict):
             return _upstream_error_message(parsed)

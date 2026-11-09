@@ -3,6 +3,62 @@
 本项目的所有显著变更记录在此文件。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；
 自 v1.0 起遵循语义化版本与 YAML 向后兼容承诺（见[升级说明](docs/upgrading.md)）。
 
+## [1.2.1] - 2026-11-09
+
+项目评估（代码质量审查 + 行业基线对照）发现问题的修复迭代。无公开 API 变化；
+全部为内部质量改进，行为等价（除明确注明的语义澄清）。
+
+### Added
+
+- **CI 类型检查与覆盖率**：`mypy`（src 全量，当前 0 错误；`check_untyped_defs` +
+  `warn_unused_ignores`，tiktoken 可选依赖豁免）与 `pytest-cov`（覆盖率基线 **88%**，
+  XML 报表作为 CI artifact 上传）；dev extras 新增 `mypy`/`pytest-cov`/`types-PyYAML`；
+- **测试分层标记**：全部 37 个测试文件带模块级 `pytestmark`——`unit`（组件级）/
+  `integration`（create_app 全管道），`pytest -m unit|integration` 可分层执行；
+- CLI 入口直接测试（`tests/test_cli.py`，6 项：check 校验/退出码契约/WARNING 路径/
+  子命令分发/参数错误）——`__main__.py` 覆盖率 0% → 直接覆盖；
+- `RawRequestProvider` 协议（provider 基座）：passthrough 能力的结构化类型，
+  `_passthrough_upstream` 返回值从 `Provider` 收窄；
+- `GatewayError.plugin_name` 显式声明（原先为 PluginChain 动态附加属性）。
+
+### Changed
+
+- **语义缓存进程内淘汰 O(n²) → 惰性 min-heap**（O(log n)）：heap 节点按
+  (deadline, 插入序号) 双重匹配 store 条目，覆盖写/TTL 清除产生的 stale 节点安全跳过。
+  语义澄清：同 deadline 下按插入序淘汰（覆盖写以覆盖时刻计龄，LRU 口径）——原 O(n²)
+  实现此场景顺序未定义；新增 3 项边界测试锁定行为；
+- `passthrough()` 126 行长函数拆分（`_passthrough_route`/`_passthrough_upstream`/
+  `_passthrough_body_out`/`_passthrough_relay`），路由反馈用的 latency 口径保持
+  读响应体前计算不变；
+- dispatcher 从 provider 基座导入 `UpstreamStreamError`（原先经 openai_provider
+  re-export 路径），`_error_body_message` 的函数内 `import json` 上提模块级。
+
+### Fixed
+
+- **E2E check-28（Anthropic 入口视觉）根因定位并修复**：v1.2.0 发布时该检查失败被
+  归因为"本机 Ollama/llama.cpp 运行时当日劣化"。本次直连上游做隔离实验（无网关）
+  精确定位：**moondream/llama.cpp 对 image-first 的多模态消息（`[image, text]` parts）
+  输出乱码/空**，text-first（`[text, image]`）正常识别——网关翻译保序语义无缺陷，
+  是上游模型对块顺序的敏感。check-28 改用 text-first 请求（Anthropic 协议允许任意
+  块顺序；保序翻译能力由单测逐块覆盖），E2E 恢复全过；
+- mypy 基线清零过程中修正的类型问题：`_window_keys` 返回类型声明（budget_field 是
+  字段名字符串而非金额）、bedrock/anthropic 流式翻译中 `call_index` 的 int|None
+  赋值冲突（查询路径改独立变量）、cohere embeddings 向量推导标注、两处过时的
+  `type: ignore[return-value]`。
+
+### Docs
+
+- BLUEPRINT 探索池按 gap-analysis §5 建议序重排（会话亲和 → Responses API → MCP
+  治理切片 → 批处理 → 控制台 UI → Realtime，次级池单列）；gap-analysis 头部注记同步。
+
+### Verified
+
+- 全量套件 **465 passed, 1 skipped**（456 原有 + 3 淘汰边界 + 6 CLI）；分层执行
+  unit / integration 均通过；
+- **E2E 29/29**（实弹，恢复全过——check-28 根因修复见 Fixed）；
+- `mypy` 0 错误（37 文件）；`ruff` All checks passed；
+- 覆盖率总览 88%（除 `tokenizers.py` 65%（tiktoken 可选分支未装）外无低覆盖盲区）。
+
 ## [1.2.0] - 2026-11-08
 
 功能复盘与差距分析（[docs/gap-analysis-2026-11.md](docs/gap-analysis-2026-11.md)）确认的两个

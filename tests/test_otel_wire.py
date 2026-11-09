@@ -12,10 +12,13 @@ from __future__ import annotations
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import pytest
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
 from aigateway.app import GatewayApp
 from tests.conftest import base_config, write_config
+
+pytestmark = pytest.mark.unit
 
 
 def make_collector(received: list) -> ThreadingHTTPServer:

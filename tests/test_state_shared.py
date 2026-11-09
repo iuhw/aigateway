@@ -19,6 +19,8 @@ from aigateway.state import (
     build_backend,
 )
 
+pytestmark = pytest.mark.unit
+
 pytest.importorskip("fakeredis", reason="fakeredis not installed (dev extra)")
 
 

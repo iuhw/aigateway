@@ -14,9 +14,12 @@ import asyncio
 import random
 
 import httpx
+import pytest
 
 from aigateway.api import create_app
 from tests.conftest import base_config, write_config
+
+pytestmark = pytest.mark.integration
 
 SEED = 20261025
 HARD_DEADLINE_S = 15.0

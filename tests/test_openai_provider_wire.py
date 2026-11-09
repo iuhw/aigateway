@@ -17,6 +17,8 @@ import pytest
 from aigateway.core.openai_provider import OpenAICompatibleProvider
 from aigateway.core.provider import UpstreamStreamError, UpstreamUnavailable
 
+pytestmark = pytest.mark.unit
+
 PAYLOAD = {"messages": [{"role": "user", "content": "hi"}], "stream": False}
 
 
